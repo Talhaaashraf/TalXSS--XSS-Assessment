@@ -1,0 +1,23 @@
+# TalXSS scan history (local artifacts, may contain target data)
+talxss.db
+*.db
+
+# Generated reports
+talxss-*.html
+talxss-*.json
+report*.html
+report*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

@@ -1,0 +1,450 @@
+"""TalXSS scanning engine.
+
+Pipeline per target:
+  1. Scope check  -> refuse anything outside the authorized host allow-list.
+  2. Crawl        -> same-host pages, collecting URL parameters and HTML forms.
+  3. Probe        -> inject a unique canary to learn IF and WHERE input reflects.
+  4. Context test -> fire only payloads that make sense for that context.
+  5. Confirm      -> a finding requires the payload's breakout markup to appear
+                     UNESCAPED in the response (low false-positive detection).
+
+The engine is intentionally polite: single-threaded with a configurable delay,
+a crawl cap, and an identifying User-Agent, so it behaves like an authorized
+assessment tool rather than a flood.
+"""
+
+from __future__ import annotations
+
+import time
+import html
+import re
+from dataclasses import dataclass, field, asdict
+from urllib.parse import urlparse, urljoin, urlencode, parse_qsl
+from collections import deque
+from typing import Callable, Iterable
+
+import requests
+from bs4 import BeautifulSoup
+
+from .payloads import (new_canary, probe_payload, library_for_context,
+                       stored_payloads, load_wordlist_payloads, Payload)
+
+DEFAULT_UA = "TalXSS/1.0 (+authorized-security-assessment)"
+
+
+# --------------------------------------------------------------------------- #
+# Configuration & result types
+# --------------------------------------------------------------------------- #
+@dataclass
+class ScanConfig:
+    start_url: str
+    scope: list[str]                 # allowed hostnames (exact or suffix match)
+    authorized: bool = False         # MUST be set True by an operator
+    max_pages: int = 40
+    delay: float = 0.3               # seconds between requests (be polite)
+    timeout: float = 12.0
+    crawl: bool = True
+    include_forms: bool = True
+    cookies: dict | None = None
+    headers: dict | None = None
+    user_agent: str = DEFAULT_UA
+    verify_tls: bool = True
+    attack_types: list[str] | None = None   # None = all; else subset of ATTACK_TYPES
+    wordlist_files: list[str] | None = None  # None = all .txt lists when wordlist on
+    max_wordlist: int = 250          # cap raw payloads fired per point (politeness)
+    store_path: str | None = None    # SQLite path to persist this scan, or None
+
+
+@dataclass
+class Finding:
+    url: str
+    method: str
+    parameter: str
+    context: str
+    payload_name: str
+    payload: str
+    severity: str
+    evidence: str
+    note: str = ""
+    attack_type: str = "reflected"
+
+
+@dataclass
+class ScanResult:
+    config_url: str
+    pages_crawled: int = 0
+    params_tested: int = 0
+    requests_made: int = 0
+    findings: list[Finding] = field(default_factory=list)
+    reflections: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    started: float = 0.0
+    finished: float = 0.0
+
+    def as_dict(self) -> dict:
+        d = asdict(self)
+        d["duration"] = round((self.finished or time.time()) - self.started, 2)
+        return d
+
+
+class ScopeError(RuntimeError):
+    pass
+
+
+class AuthorizationError(RuntimeError):
+    pass
+
+
+# --------------------------------------------------------------------------- #
+# Scope enforcement — the guardrail that keeps this a VAPT tool
+# --------------------------------------------------------------------------- #
+def _host(url: str) -> str:
+    return (urlparse(url).hostname or "").lower()
+
+
+def in_scope(url: str, scope: Iterable[str]) -> bool:
+    h = _host(url)
+    if not h:
+        return False
+    for allowed in scope:
+        a = allowed.lower().strip()
+        if not a:
+            continue
+        if h == a or h.endswith("." + a):
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# Reflection / context analysis
+# --------------------------------------------------------------------------- #
+_SCRIPT_BLOCK = re.compile(r"<script\b[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+
+
+def detect_context(body: str, canary: str) -> str:
+    """Classify the reflection context of `canary` within `body`.
+
+    Returns one of: html, attr_double, attr_single, script, none.
+    Picks the first (and typically most exploitable) occurrence.
+    """
+    idx = body.find(canary)
+    if idx == -1:
+        return "none"
+
+    # Inside a <script> block?
+    for m in _SCRIPT_BLOCK.finditer(body):
+        if m.start(1) <= idx <= m.end(1):
+            return "script"
+
+    # Look at the current open tag (if any) to the left of the canary.
+    left = body[:idx]
+    last_lt = left.rfind("<")
+    last_gt = left.rfind(">")
+    if last_lt > last_gt:
+        # We are inside a tag: likely an attribute value. Which quote?
+        tag_fragment = left[last_lt:]
+        dq = tag_fragment.count('"')
+        sq = tag_fragment.count("'")
+        if dq % 2 == 1:
+            return "attr_double"
+        if sq % 2 == 1:
+            return "attr_single"
+        # Unquoted attribute — treat as double for breakout attempts.
+        return "attr_double"
+
+    return "html"
+
+
+def _unescaped_present(body: str, marker: str) -> bool:
+    """True only if `marker` appears literally AND not HTML-encoded.
+
+    If the app escaped our angle brackets/quotes, the escaped form will be
+    present instead of the raw marker — which is a *safe* result, not a finding.
+    """
+    if marker not in body:
+        return False
+    encoded = html.escape(marker, quote=True)
+    if encoded == marker:
+        return True  # nothing to encode; rely on raw presence
+    # Raw marker present and differs from its encoded form => unescaped sink.
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Target model: an injectable parameter on a URL or form
+# --------------------------------------------------------------------------- #
+@dataclass
+class InjectionPoint:
+    url: str                 # action URL
+    method: str              # GET or POST
+    param: str               # parameter name being fuzzed
+    base_params: dict        # other params held constant
+
+
+class Scanner:
+    def __init__(self, config: ScanConfig, logger: Callable[[str], None] | None = None):
+        self.cfg = config
+        self.log = logger or (lambda m: None)
+        self.result = ScanResult(config_url=config.start_url)
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": config.user_agent})
+        if config.headers:
+            self.session.headers.update(config.headers)
+        if config.cookies:
+            self.session.cookies.update(config.cookies)
+        self._seen_points: set[tuple] = set()
+        self._visited_pages: list[str] = []          # GET-able URLs, for stored pass
+        self._submitted: list[tuple[str, Payload, InjectionPoint]] = []  # canary,payload,point
+        self.attack_types = config.attack_types      # None = all
+
+    # -- HTTP ------------------------------------------------------------- #
+    def _request(self, method: str, url: str, params=None, data=None):
+        self.result.requests_made += 1
+        if self.cfg.delay:
+            time.sleep(self.cfg.delay)
+        return self.session.request(
+            method, url, params=params, data=data,
+            timeout=self.cfg.timeout, allow_redirects=True,
+            verify=self.cfg.verify_tls,
+        )
+
+    # -- Crawl ------------------------------------------------------------ #
+    def crawl(self) -> list[InjectionPoint]:
+        start = self.cfg.start_url
+        if not in_scope(start, self.cfg.scope):
+            raise ScopeError(f"Start URL {start!r} is not within authorized scope {self.cfg.scope}")
+
+        points: list[InjectionPoint] = []
+        queue: deque[str] = deque([start])
+        visited: set[str] = set()
+
+        while queue and len(visited) < self.cfg.max_pages:
+            url = queue.popleft()
+            if url in visited:
+                continue
+            visited.add(url)
+
+            if not in_scope(url, self.cfg.scope):
+                continue
+
+            try:
+                resp = self._request("GET", url)
+            except requests.RequestException as e:
+                self.result.errors.append(f"GET {url}: {e}")
+                continue
+
+            self.result.pages_crawled += 1
+            if url not in self._visited_pages:
+                self._visited_pages.append(url)
+            self.log(f"[crawl] {url} ({resp.status_code})")
+
+            # URL-parameter injection points
+            for ip in self._points_from_url(url):
+                self._add_point(points, ip)
+
+            ctype = resp.headers.get("Content-Type", "")
+            if "html" not in ctype.lower():
+                continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            if self.cfg.include_forms:
+                for ip in self._points_from_forms(url, soup):
+                    self._add_point(points, ip)
+
+            if self.cfg.crawl:
+                for a in soup.find_all("a", href=True):
+                    nxt = urljoin(url, a["href"]).split("#")[0]
+                    if in_scope(nxt, self.cfg.scope) and nxt not in visited:
+                        queue.append(nxt)
+
+        return points
+
+    def _points_from_url(self, url: str) -> list[InjectionPoint]:
+        parsed = urlparse(url)
+        qs = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if not qs:
+            return []
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        out = []
+        for name in qs:
+            out.append(InjectionPoint(base, "GET", name, dict(qs)))
+        return out
+
+    def _points_from_forms(self, page_url: str, soup: BeautifulSoup) -> list[InjectionPoint]:
+        out = []
+        for form in soup.find_all("form"):
+            action = urljoin(page_url, form.get("action") or page_url).split("#")[0]
+            if not in_scope(action, self.cfg.scope):
+                continue
+            method = (form.get("method") or "GET").upper()
+            fields: dict[str, str] = {}
+            for inp in form.find_all(["input", "textarea", "select"]):
+                name = inp.get("name")
+                if not name:
+                    continue
+                fields[name] = inp.get("value") or "test"
+            for name in fields:
+                if (inp_type := _field_type(form, name)) in ("submit", "button", "hidden"):
+                    continue
+                out.append(InjectionPoint(action, method, name, dict(fields)))
+        return out
+
+    def _add_point(self, points: list[InjectionPoint], ip: InjectionPoint):
+        key = (ip.url, ip.method, ip.param)
+        if key not in self._seen_points:
+            self._seen_points.add(key)
+            points.append(ip)
+
+    # -- Test ------------------------------------------------------------- #
+    def _stored_enabled(self) -> bool:
+        return self.attack_types is None or "stored" in self.attack_types
+
+    def test_point(self, ip: InjectionPoint) -> None:
+        canary = new_canary()
+        probe = probe_payload(canary)
+
+        body = self._send(ip, probe)
+        if body is None:
+            return
+        self.result.params_tested += 1
+
+        # Stored XSS: submit persistence payloads NOW, regardless of whether the
+        # immediate response reflects them. They are hunted for later, on other
+        # pages, by stored_pass(). This is what catches guestbook/comment sinks.
+        if self._stored_enabled():
+            for sp in stored_payloads(canary, self.attack_types):
+                self._submitted.append((canary, sp, ip))
+                self._send(ip, sp.value)
+
+        if canary not in body:
+            return  # not reflected here -> only the stored path (above) applies
+
+        context = detect_context(body, canary)
+        self.result.reflections.append(
+            {"url": ip.url, "method": ip.method, "param": ip.param, "context": context}
+        )
+        self.log(f"[reflect] {ip.method} {ip.url} param={ip.param} context={context}")
+        if context == "none":
+            return
+
+        # Context-aware payloads (reflected/cookie/dom/polyglot/waf); stored is
+        # handled above, so drop it from the inline loop to avoid double-submits.
+        inline_types = None
+        if self.attack_types is not None:
+            inline_types = [t for t in self.attack_types if t != "stored"]
+        payloads = library_for_context(context, canary, inline_types)
+        # Operator's curated wordlists, if the 'wordlist' attack type is enabled.
+        if self.attack_types is None or "wordlist" in self.attack_types:
+            payloads += load_wordlist_payloads(
+                canary, self.cfg.wordlist_files, self.cfg.max_wordlist)
+
+        found_here = False
+        for payload in payloads:
+            resp_body = self._send(ip, payload.value)
+            if resp_body is None:
+                continue
+            if not found_here and _unescaped_present(resp_body, payload.confirm):
+                self._record(ip, context, payload, resp_body)
+                self.log(f"[FOUND] {payload.severity.upper()} [{payload.attack_type}] "
+                         f"{ip.method} {ip.url} param={ip.param} :: {payload.name}")
+                found_here = True
+                if payload.attack_type != "cookie":
+                    break  # solid reflected hit; keep probing cookie-impact PoCs
+
+    def _send(self, ip: InjectionPoint, value: str) -> str | None:
+        params = dict(ip.base_params)
+        params[ip.param] = value
+        try:
+            if ip.method == "POST":
+                resp = self._request("POST", ip.url, data=params)
+            else:
+                resp = self._request("GET", ip.url, params=params)
+            return resp.text
+        except requests.RequestException as e:
+            self.result.errors.append(f"{ip.method} {ip.url} [{ip.param}]: {e}")
+            return None
+
+    def _record(self, ip: InjectionPoint, context: str, payload: Payload, body: str,
+                stored_url: str | None = None):
+        pos = body.find(payload.confirm)
+        snippet = body[max(0, pos - 60): pos + len(payload.confirm) + 60]
+        note = payload.note
+        if stored_url:
+            note = f"STORED: injected at {ip.url} [{ip.param}], resurfaced on {stored_url}. {note}"
+        self.result.findings.append(Finding(
+            url=stored_url or ip.url, method=ip.method, parameter=ip.param, context=context,
+            payload_name=payload.name, payload=payload.value,
+            severity=payload.severity, note=note, attack_type=payload.attack_type,
+            evidence="…" + snippet.replace("\n", " ") + "…",
+        ))
+
+    # -- Stored XSS pass -------------------------------------------------- #
+    def stored_pass(self) -> None:
+        """Re-fetch crawled pages and flag any submitted payload that resurfaced
+        on a DIFFERENT page than where it was injected — the signature of stored XSS."""
+        if not self._submitted:
+            return
+        self.log(f"[stored] re-checking {len(self._visited_pages)} page(s) for "
+                 f"{len(self._submitted)} persisted payload(s)")
+        for url in list(self._visited_pages):
+            body = self._send_get(url)
+            if body is None:
+                continue
+            for canary, payload, ip in self._submitted:
+                if canary not in body:
+                    continue
+                # Different page than the injection action => stored, not reflected.
+                if url.split("?")[0] == ip.url.split("?")[0]:
+                    continue
+                if _unescaped_present(body, payload.confirm):
+                    self._record(ip, "html", payload, body, stored_url=url)
+                    self.log(f"[FOUND] {payload.severity.upper()} [stored] "
+                             f"{ip.url}[{ip.param}] -> {url} :: {payload.name}")
+
+    def _send_get(self, url: str) -> str | None:
+        try:
+            return self._request("GET", url).text
+        except requests.RequestException as e:
+            self.result.errors.append(f"GET {url}: {e}")
+            return None
+
+    # -- Orchestration ---------------------------------------------------- #
+    def run(self) -> ScanResult:
+        if not self.cfg.authorized:
+            raise AuthorizationError(
+                "Scan refused: operator has not confirmed authorization for this target. "
+                "Set authorized=True only when you have written permission to test it."
+            )
+        self.result.started = time.time()
+        self.log(f"[start] TalXSS scan of {self.cfg.start_url} | scope={self.cfg.scope}")
+        try:
+            points = self.crawl()
+            self.log(f"[crawl] discovered {len(points)} injection point(s)")
+            for ip in points:
+                self.test_point(ip)
+            # Stored XSS: did anything we submitted resurface elsewhere?
+            if self.attack_types is None or "stored" in self.attack_types:
+                self.stored_pass()
+        finally:
+            self.result.finished = time.time()
+        self.log(f"[done] {len(self.result.findings)} finding(s), "
+                 f"{self.result.requests_made} request(s)")
+
+        if self.cfg.store_path:
+            try:
+                from .store import Store
+                sid = Store(self.cfg.store_path).save_scan(
+                    self.result, self.cfg.scope,
+                    self.attack_types or ["(all)"])
+                self.log(f"[store] saved scan #{sid} to {self.cfg.store_path}")
+            except Exception as e:  # noqa: BLE001
+                self.result.errors.append(f"store: {e}")
+        return self.result
+
+
+def _field_type(form, name: str) -> str:
+    el = form.find(attrs={"name": name})
+    if el is None:
+        return ""
+    return (el.get("type") or "").lower()

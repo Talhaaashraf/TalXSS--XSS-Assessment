@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TalXSS — Authorized XSS Assessment</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --muted:#8b949e;
+    --accent:#2f81f7; --accent2:#1f6feb; --high:#f85149; --med:#d29922; --ok:#3fb950;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+  header{padding:1.2rem 1.5rem;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:.8rem}
+  header h1{margin:0;font-size:1.4rem;letter-spacing:.5px}
+  header .tag{color:var(--muted);font-size:.85rem}
+  header .ver{margin-left:auto;color:var(--muted);font-size:.8rem}
+  main{max-width:1050px;margin:0 auto;padding:1.5rem}
+  .notice{background:#1c2432;border:1px solid var(--accent2);border-radius:10px;padding:.9rem 1.1rem;margin-bottom:1.3rem;font-size:.9rem;color:#c9d7ec}
+  .barwrap{display:flex;gap:.6rem;margin-bottom:1rem}
+  .barwrap input[type=text]{flex:1;padding:.85rem 1rem;font-size:1.05rem;background:var(--panel);
+    border:1px solid var(--line);border-radius:10px;color:var(--fg)}
+  .barwrap input[type=text]:focus{outline:none;border-color:var(--accent)}
+  button.go{padding:0 1.6rem;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;
+    border:none;border-radius:10px;cursor:pointer}
+  button.go:disabled{opacity:.5;cursor:not-allowed}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;margin-bottom:1rem}
+  .field label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em}
+  .field input,.field textarea{width:100%;padding:.55rem .7rem;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;color:var(--fg);font-family:ui-monospace,Consolas,monospace;font-size:.85rem}
+  .field textarea{min-height:60px;resize:vertical}
+  .row{display:flex;gap:1.3rem;flex-wrap:wrap;align-items:center;margin:.3rem 0 1rem}
+  .row label{font-size:.85rem;color:var(--fg);display:flex;align-items:center;gap:.4rem}
+  .authbox{background:#2a1215;border:1px solid var(--high);border-radius:10px;padding:.9rem 1.1rem;margin-bottom:1rem}
+  .authbox label{font-weight:600;display:flex;gap:.5rem;align-items:flex-start;font-size:.9rem}
+  .cards{display:flex;gap:.8rem;flex-wrap:wrap;margin:1.2rem 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem 1rem;min-width:95px}
+  .card b{display:block;font-size:1.5rem} .card span{color:var(--muted);font-size:.75rem}
+  .panels{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+  @media(max-width:820px){.panels,.grid{grid-template-columns:1fr}}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .box h3{margin:0;padding:.6rem .9rem;font-size:.85rem;border-bottom:1px solid var(--line);background:#11161d}
+  #log{height:300px;overflow:auto;padding:.7rem .9rem;font-family:ui-monospace,Consolas,monospace;font-size:.78rem;white-space:pre-wrap}
+  #findings{height:300px;overflow:auto;padding:.5rem}
+  .finding{border:1px solid var(--line);border-radius:8px;padding:.6rem .7rem;margin-bottom:.55rem}
+  .finding .sev{font-weight:700;font-size:.72rem;padding:.1rem .5rem;border-radius:999px;color:#fff}
+  .sev.high{background:var(--high)} .sev.medium{background:var(--med)} .sev.low{background:var(--muted)}
+  .finding .mono{font-family:ui-monospace,Consolas,monospace;font-size:.78rem;word-break:break-all;color:#c9d7ec}
+  .dl{margin-top:1rem;display:flex;gap:.6rem}
+  .dl a{color:var(--accent);text-decoration:none;border:1px solid var(--line);padding:.45rem .8rem;border-radius:8px;font-size:.85rem}
+  .status{font-size:.85rem;color:var(--muted);margin-left:.6rem}
+  details summary{cursor:pointer;color:var(--muted);font-size:.85rem;margin-bottom:.6rem}
+</style>
+</head>
+<body>
+<header>
+  <h1>Tal<span style="color:var(--accent)">XSS</span></h1>
+  <span class="tag">Authorized XSS Vulnerability Assessment</span>
+  <span class="ver">v{{ version }}</span>
+</header>
+<main>
+  <div class="notice">
+    <b>Legal &amp; ethical use only.</b> TalXSS is a VAPT tool. Only scan systems you own or have
+    <b>explicit written authorization</b> to test (signed engagement, in-scope bug bounty, or a lab you control).
+    Unauthorized scanning is illegal and may cause harm. The scanner enforces the host scope below and refuses
+    to run until you confirm authorization.
+  </div>
+
+  <!-- TARGET INSERT BAR -->
+  <div class="barwrap">
+    <input id="target" type="text" placeholder="Target URL  e.g.  https://your-authorized-site.example/search?q=test" autocomplete="off">
+    <button id="go" class="go">Start Scan</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <div class="grid">
+    <div class="field">
+      <label>In-scope hosts (space/comma separated — defaults to target host)</label>
+      <input id="scope" type="text" placeholder="your-authorized-site.example">
+    </div>
+    <div class="field">
+      <label>Request delay (seconds) · Max pages</label>
+      <div style="display:flex;gap:.5rem">
+        <input id="delay" type="text" value="0.3">
+        <input id="maxpages" type="text" value="40">
+      </div>
+    </div>
+  </div>
+
+  <details>
+    <summary>Advanced: authenticated session (cookies / headers)</summary>
+    <div class="grid">
+      <div class="field">
+        <label>Cookies (one per line, name=value)</label>
+        <textarea id="cookies" placeholder="session=abc123"></textarea>
+      </div>
+      <div class="field">
+        <label>Extra headers (one per line, Name: value)</label>
+        <textarea id="headers" placeholder="Authorization: Bearer ..."></textarea>
+      </div>
+    </div>
+  </details>
+
+  <div class="row">
+    <label><input type="checkbox" id="crawl" checked> Crawl same-host links</label>
+    <label><input type="checkbox" id="forms" checked> Test HTML forms</label>
+    <label><input type="checkbox" id="verifytls" checked> Verify TLS</label>
+    <label><input type="checkbox" id="nostore"> Don't save to history</label>
+  </div>
+
+  <div class="box" style="margin-bottom:1rem">
+    <h3>Attack types (manual selection — leave all ticked for a full assessment)</h3>
+    <div style="padding:.7rem .9rem">
+      <div class="row" id="attacktypes" style="margin:0 0 .6rem">
+        {% for t in attack_types %}
+        <label><input type="checkbox" class="atk" value="{{ t }}" checked> {{ t }}</label>
+        {% endfor %}
+      </div>
+      <div class="field">
+        <label>Payload wordlists (used when "wordlist" is ticked)</label>
+        <div class="row" id="wordlists" style="margin:.2rem 0">
+          {% for w in wordlists %}
+          <label><input type="checkbox" class="wl" value="{{ w }}" checked> {{ w }}</label>
+          {% else %}
+          <span style="color:var(--muted)">No .txt lists found in talxss/payload_lists/.</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="field" style="max-width:260px">
+        <label>Max wordlist payloads per point</label>
+        <input id="maxwordlist" type="text" value="250">
+      </div>
+    </div>
+  </div>
+
+  <div class="authbox">
+    <label><input type="checkbox" id="authorized">
+      I confirm I own this target or have explicit written authorization to perform an XSS
+      security assessment against it and the scope listed above.</label>
+  </div>
+
+  <div class="cards" id="cards" style="display:none">
+    <div class="card"><b id="c-find">0</b><span>Findings</span></div>
+    <div class="card"><b id="c-pages">0</b><span>Pages</span></div>
+    <div class="card"><b id="c-params">0</b><span>Params</span></div>
+    <div class="card"><b id="c-refl">0</b><span>Reflections</span></div>
+    <div class="card"><b id="c-req">0</b><span>Requests</span></div>
+  </div>
+
+  <div class="panels">
+    <div class="box"><h3>Live findings</h3><div id="findings"></div></div>
+    <div class="box"><h3>Scan log</h3><div id="log"></div></div>
+  </div>
+
+  <div class="dl" id="dl" style="display:none">
+    <a id="dl-html" href="#" target="_blank">⬇ Download HTML report</a>
+    <a id="dl-json" href="#" target="_blank">⬇ Download JSON</a>
+  </div>
+
+  <div class="box" style="margin-top:1.4rem">
+    <h3>Scan history (stored in talxss.db) <a href="#" id="refresh-hist" style="float:right;color:var(--accent);font-size:.8rem;text-decoration:none">↻ refresh</a></h3>
+    <div id="history" style="padding:.5rem"></div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let poll = null, jobId = null;
+
+$("#go").addEventListener("click", startScan);
+$("#target").addEventListener("keydown", e => { if (e.key === "Enter") startScan(); });
+
+async function startScan(){
+  const target = $("#target").value.trim();
+  if(!target){ setStatus("Enter a target URL."); return; }
+  if(!$("#authorized").checked){ setStatus("Confirm authorization first."); return; }
+
+  const atk = [...document.querySelectorAll(".atk:checked")].map(e => e.value);
+  const wl  = [...document.querySelectorAll(".wl:checked")].map(e => e.value);
+  const payload = {
+    target,
+    scope: $("#scope").value,
+    authorized: true,
+    delay: parseFloat($("#delay").value) || 0.3,
+    max_pages: parseInt($("#maxpages").value) || 40,
+    crawl: $("#crawl").checked,
+    include_forms: $("#forms").checked,
+    verify_tls: $("#verifytls").checked,
+    cookies: $("#cookies").value,
+    headers: $("#headers").value,
+    attack_types: atk,
+    wordlists: wl,
+    max_wordlist: parseInt($("#maxwordlist").value) || 250,
+    no_store: $("#nostore").checked,
+  };
+
+  $("#go").disabled = true;
+  $("#findings").innerHTML = ""; $("#log").textContent = "";
+  $("#cards").style.display = "flex"; $("#dl").style.display = "none";
+  setStatus("Starting…");
+
+  const r = await fetch("/api/scan", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(payload)});
+  const data = await r.json();
+  if(!r.ok){ setStatus("✗ " + (data.error||"error")); $("#go").disabled=false; return; }
+
+  jobId = data.job_id;
+  setStatus("Scanning scope: " + data.scope.join(", "));
+  poll = setInterval(refresh, 1000);
+}
+
+async function refresh(){
+  if(!jobId) return;
+  const r = await fetch("/api/status/" + jobId);
+  const d = await r.json();
+  $("#log").textContent = (d.log||[]).join("\n");
+  $("#log").scrollTop = $("#log").scrollHeight;
+
+  if(d.summary){
+    $("#c-find").textContent = d.findings.length;
+    $("#c-pages").textContent = d.summary.pages_crawled;
+    $("#c-params").textContent = d.summary.params_tested;
+    $("#c-refl").textContent = (d.summary.reflections||[]).length;
+    $("#c-req").textContent = d.summary.requests_made;
+  }
+  renderFindings(d.findings||[]);
+
+  if(d.status !== "running"){
+    clearInterval(poll); $("#go").disabled = false;
+    if(d.status==="done"){
+      setStatus("✓ Done — " + (d.findings.length) + " finding(s).");
+      $("#dl").style.display="flex";
+      $("#dl-html").href="/api/report/"+jobId+".html";
+      $("#dl-json").href="/api/report/"+jobId+".json";
+      loadHistory();
+    } else if(d.status==="refused"){ setStatus("✗ Refused: " + d.error); }
+    else { setStatus("✗ " + (d.error||"error")); }
+  }
+}
+
+async function loadHistory(){
+  try{
+    const r = await fetch("/api/history"); const d = await r.json();
+    const box = $("#history");
+    if(!d.scans || !d.scans.length){ box.innerHTML='<div style="color:var(--muted);padding:.4rem">No saved scans yet.</div>'; return; }
+    box.innerHTML = d.scans.map(s => `
+      <div class="finding" style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <b>#${s.id}</b> · <span class="mono">${esc(s.target)}</span>
+          <div style="color:var(--muted);font-size:.78rem">types: ${esc(s.attack_types)} · pages ${s.pages} · params ${s.params} · requests ${s.requests}</div>
+        </div>
+        <div><span class="sev ${s.findings? 'high':'low'}">${s.findings} finding(s)</span></div>
+      </div>`).join("");
+  }catch(e){}
+}
+$("#refresh-hist").addEventListener("click", e => { e.preventDefault(); loadHistory(); });
+loadHistory();
+
+function renderFindings(findings){
+  const box = $("#findings");
+  if(!findings.length){ if(!box.innerHTML) box.innerHTML='<div style="color:var(--muted);padding:.5rem">No confirmed findings yet…</div>'; return; }
+  box.innerHTML = findings.map(f => `
+    <div class="finding">
+      <div><span class="sev ${esc(f.severity)}">${esc(f.severity.toUpperCase())}</span>
+        <b>&nbsp;${esc(f.method)}</b> · param <b>${esc(f.parameter)}</b> · ${esc(f.context)}</div>
+      <div class="mono" style="margin:.35rem 0">${esc(f.url)}</div>
+      <div class="mono">payload: ${esc(f.payload)}</div>
+      <div class="mono" style="color:var(--muted);margin-top:.3rem">${esc(f.evidence)}</div>
+    </div>`).join("");
+}
+
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function setStatus(s){ $("#status").textContent = s; }
+</script>
+</body>
+</html>
