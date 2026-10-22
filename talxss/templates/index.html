@@ -110,6 +110,12 @@
     <label><input type="checkbox" id="nostore"> Don't save to history</label>
   </div>
 
+  <div class="row">
+    <label><input type="checkbox" id="wafcheck" checked> Detect firewall/WAF first</label>
+    <label><input type="checkbox" id="recon" checked> Recon + security headers</label>
+    <label><input type="checkbox" id="headerxss" checked> Header XSS (UA/Referer/XFF)</label>
+  </div>
+
   <div class="box" style="margin-bottom:1rem">
     <h3>Attack types (manual selection — leave all ticked for a full assessment)</h3>
     <div style="padding:.7rem .9rem">
@@ -147,6 +153,11 @@
     <div class="card"><b id="c-params">0</b><span>Params</span></div>
     <div class="card"><b id="c-refl">0</b><span>Reflections</span></div>
     <div class="card"><b id="c-req">0</b><span>Requests</span></div>
+  </div>
+
+  <div class="box" id="reconbox" style="display:none;margin-bottom:1rem">
+    <h3>🛡️ Recon &amp; WAF</h3>
+    <div id="reconbanner" style="padding:.7rem .9rem;font-size:.9rem"></div>
   </div>
 
   <div class="panels">
@@ -196,6 +207,9 @@ async function startScan(){
     no_store: $("#nostore").checked,
     verbose: $("#verbose").checked,
     verify: $("#verify").checked,
+    waf_check: $("#wafcheck").checked,
+    recon: $("#recon").checked,
+    header_xss: $("#headerxss").checked,
   };
 
   $("#go").disabled = true;
@@ -226,6 +240,7 @@ async function refresh(){
     $("#c-params").textContent = d.summary.params_tested;
     $("#c-refl").textContent = (d.summary.reflections||[]).length;
     $("#c-req").textContent = d.summary.requests_made;
+    renderRecon(d.summary.waf||{}, d.summary.recon||{});
   }
   renderFindings(d.findings||[]);
 
@@ -259,6 +274,16 @@ async function loadHistory(){
 }
 $("#refresh-hist").addEventListener("click", e => { e.preventDefault(); loadHistory(); });
 loadHistory();
+
+function renderRecon(waf, recon){
+  if(!waf || (!Object.keys(waf).length && !Object.keys(recon).length)) return;
+  $("#reconbox").style.display="block";
+  const wafTxt = waf.present
+    ? `<b style="color:var(--high)">${esc(waf.name||'unknown')}</b> — confidence ${esc(waf.confidence||'none')}, actively blocking: ${waf.blocking?'yes':'no'}`
+    : "<b style=\"color:var(--ok)\">none fingerprinted</b> on the baseline response";
+  const items = Object.entries(recon||{}).map(([k,v]) => `<li><b>${esc(k)}:</b> <span class="mono">${esc(String(v))}</span></li>`).join("");
+  $("#reconbanner").innerHTML = `🛡️ Firewall / WAF: ${wafTxt}<ul style="margin:.4rem 0 0;padding-left:1.1rem">${items||'<li style="color:var(--muted)">no server/tech headers disclosed</li>'}</ul>`;
+}
 
 function renderFindings(findings){
   const box = $("#findings");

@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 PAYLOAD_LIST_DIR = Path(__file__).resolve().parent / "payload_lists"
 
 # Known attack types an operator can select from.
-ATTACK_TYPES = ["reflected", "stored", "cookie", "dom", "polyglot", "waf-bypass", "wordlist"]
+ATTACK_TYPES = ["reflected", "stored", "cookie", "dom", "polyglot", "waf-bypass",
+                "wordlist", "header"]
 
 
 def new_canary() -> str:

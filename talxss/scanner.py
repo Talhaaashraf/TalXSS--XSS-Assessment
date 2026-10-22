@@ -29,6 +29,7 @@ from bs4 import BeautifulSoup
 from .payloads import (new_canary, probe_payload, library_for_context,
                        stored_payloads, load_wordlist_payloads, exec_payloads, Payload)
 from . import analyzer
+from . import recon as _recon
 from . import verify as _verify
 
 DEFAULT_UA = "TalXSS/1.0 (+authorized-security-assessment)"
@@ -57,6 +58,9 @@ class ScanConfig:
     store_path: str | None = None    # SQLite path to persist this scan, or None
     verbose: bool = False            # log every probe/payload as it is fired
     verify: bool = False             # confirm execution in a headless browser (Playwright)
+    waf_check: bool = True           # fingerprint the WAF/firewall first, then adapt
+    recon: bool = True               # fingerprint stack + analyse security headers
+    header_xss: bool = True          # test XSS via HTTP request headers
 
 
 @dataclass
@@ -82,6 +86,8 @@ class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     reflections: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    recon: dict = field(default_factory=dict)   # server/tech fingerprint
+    waf: dict = field(default_factory=dict)      # WAF profile
     started: float = 0.0
     finished: float = 0.0
 
@@ -488,6 +494,104 @@ class Scanner:
                          f"{ip.url} param={ip.param} :: {payload.name}")
                 return  # one proven execution per point is enough
 
+    # -- Recon & WAF (the professional's first moves) --------------------- #
+    def recon_pass(self) -> None:
+        """Fingerprint the stack, read security headers, and detect the WAF FIRST.
+
+        A real black-box engagement starts here: know what's in front of the app
+        before you poke it. WAF handling is detect-report-and-slow-down, never
+        evasion. Honours scope/authorization via the normal request path.
+        """
+        base = self.cfg.start_url
+        if not in_scope(base, self.cfg.scope):
+            raise ScopeError(f"Start URL {base!r} is not within authorized scope {self.cfg.scope}")
+        try:
+            baseline = self._request("GET", base)
+        except requests.RequestException as e:
+            self.result.errors.append(f"recon GET {base}: {e}")
+            return
+
+        if self.cfg.recon:
+            fp = _recon.fingerprint(baseline)
+            self.result.recon = fp
+            self.log(f"[recon] {fp}")
+            for d in _recon.security_headers(baseline, url=base):
+                self.result.findings.append(Finding(**d))
+                self.log(f"[recon] {d['severity'].upper()} [security-header] {d['payload_name']}")
+
+        if self.cfg.waf_check:
+            prof = _recon.detect_waf(self._request, base, baseline, logger=self.log)
+            self.result.waf = prof.as_dict()
+            if prof.present:
+                self.result.findings.append(Finding(
+                    url=base, method="GET", parameter="-", context="recon",
+                    payload_name=f"waf:{prof.name}", payload="", severity="low",
+                    attack_type="waf", note="; ".join(prof.evidence) or "WAF fingerprinted.",
+                    evidence=f"{prof.name} (confidence={prof.confidence}, blocking={prof.blocking})",
+                ))
+            # Adapt: if the WAF actively blocked a benign probe, slow down to be polite.
+            if prof.blocking and self.cfg.delay < 1.0:
+                self.cfg.delay = 1.0
+                self.log("[waf] active blocking seen — throttling to 1.0s/request to be polite")
+
+    # -- Header-based XSS ------------------------------------------------- #
+    _HEADER_SINKS = ("User-Agent", "Referer", "X-Forwarded-For", "X-Forwarded-Host")
+
+    def header_xss_pass(self) -> None:
+        """Test XSS through request headers that apps often reflect (UA/Referer/XFF)."""
+        if not self._visited_pages:
+            return
+        self.log(f"[header] testing {len(self._HEADER_SINKS)} header sink(s) across "
+                 f"{len(self._visited_pages)} page(s)")
+        for url in list(self._visited_pages):
+            for header in self._HEADER_SINKS:
+                self._test_header(url, header)
+
+    def _test_header(self, url: str, header: str) -> None:
+        canary = new_canary()
+        probe = analyzer.build_char_probe(canary)
+        try:
+            resp = self._request_with_header("GET", url, header, probe)
+        except requests.RequestException as e:
+            self.result.errors.append(f"header {header} {url}: {e}")
+            return
+        body = resp.text
+        self._vlog(f"[probe] HEADER {header} {url} canary={canary} "
+                   f"reflected={'YES' if canary in body else 'no'}")
+        if canary not in body:
+            return
+        context = detect_context(body, canary)
+        if context == "none":
+            return
+        prof = analyzer.analyze(body, canary, context)
+        self.log(f"[header] {header} reflected at {url} | {prof.summary()}")
+        for payload in library_for_context(context, canary, ["reflected"]):
+            if not analyzer.payload_feasible(payload.value, prof):
+                continue
+            try:
+                rb = self._request_with_header("GET", url, header, payload.value).text
+            except requests.RequestException:
+                continue
+            if _unescaped_present(rb, payload.confirm):
+                pos = rb.find(payload.confirm)
+                self.result.findings.append(Finding(
+                    url=url, method="GET", parameter=f"header:{header}", context=context,
+                    payload_name=payload.name, payload=payload.value, severity="high",
+                    attack_type="header",
+                    note=f"Reflected XSS via the {header} request header.",
+                    evidence="…" + rb[max(0, pos - 50):pos + 80].replace("\n", " ") + "…",
+                ))
+                self.log(f"[FOUND] HIGH [header] {header} @ {url} :: {payload.name}")
+                return
+
+    def _request_with_header(self, method: str, url: str, header: str, value: str):
+        self.result.requests_made += 1
+        if self.cfg.delay:
+            time.sleep(self.cfg.delay)
+        return self.session.request(method, url, headers={header: value},
+                                    timeout=self.cfg.timeout, allow_redirects=True,
+                                    verify=self.cfg.verify_tls)
+
     # -- Orchestration ---------------------------------------------------- #
     def run(self) -> ScanResult:
         if not self.cfg.authorized:
@@ -498,10 +602,17 @@ class Scanner:
         self.result.started = time.time()
         self.log(f"[start] TalXSS scan of {self.cfg.start_url} | scope={self.cfg.scope}")
         try:
+            # Professional first moves: recon + WAF detection BEFORE any attacks.
+            if self.cfg.recon or self.cfg.waf_check:
+                self.recon_pass()
             points = self.crawl()
             self.log(f"[crawl] discovered {len(points)} injection point(s)")
             for ip in points:
                 self.test_point(ip)
+            # XSS via request headers (UA/Referer/XFF), if enabled.
+            if self.cfg.header_xss and (self.attack_types is None
+                                        or "header" in self.attack_types):
+                self.header_xss_pass()
             # Stored XSS: did anything we submitted resurface elsewhere?
             if self.attack_types is None or "stored" in self.attack_types:
                 self.stored_pass()

@@ -35,6 +35,23 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
         '<tr><td colspan="8">No reflected/stored XSS confirmed in the tested scope.</td></tr>'
     )
     generated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+    recon = d.get("recon") or {}
+    waf = d.get("waf") or {}
+    if waf.get("present"):
+        waf_line = (f"<b>{html.escape(str(waf.get('name', 'unknown')))}</b> "
+                    f"— confidence {html.escape(str(waf.get('confidence', 'none')))}, "
+                    f"actively blocking: {waf.get('blocking', False)}")
+    else:
+        waf_line = "<b>None fingerprinted</b> on the baseline response"
+    recon_items = "".join(
+        f"<li><b>{html.escape(str(k))}:</b> {html.escape(str(v))}</li>"
+        for k, v in recon.items()
+    ) or "<li>No server/technology headers disclosed.</li>"
+    recon_html = (f'<h2>Recon &amp; WAF</h2><div class="recon">'
+                  f'<div class="waf">🛡️ Firewall / WAF: {waf_line}</div>'
+                  f'<ul>{recon_items}</ul></div>')
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>TalXSS Report — {html.escape(d['config_url'])}</title>
@@ -50,6 +67,8 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
  .mono{{font-family:ui-monospace,Consolas,monospace;word-break:break-all}} .small{{font-size:.78rem}}
  .badge{{padding:.15rem .5rem;border-radius:999px;color:#fff;font-size:.72rem;font-weight:700}}
  .sev-high .badge{{background:#c0392b}} .sev-medium .badge{{background:#d35400}} .sev-low .badge{{background:#7f8c8d}}
+ .recon{{background:#fff;border:1px solid #e3e3e3;border-radius:10px;padding:1rem 1.25rem;margin:.5rem 0 1.5rem}}
+ .recon .waf{{font-size:1.05rem;margin-bottom:.5rem}} .recon ul{{margin:.3rem 0 0;padding-left:1.2rem;color:#444}}
  footer{{margin-top:2rem;color:#888;font-size:.8rem}}
 </style></head><body>
 <h1>TalXSS Assessment Report</h1>
@@ -62,6 +81,7 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
   <div class="card"><b>{d['requests_made']}</b>Requests</div>
   <div class="card"><b>{d['duration']}s</b>Duration</div>
 </div>
+{recon_html}
 <h2>Findings</h2>
 <table>
  <tr><th>Severity</th><th>Type</th><th>Method</th><th>URL</th><th>Param</th><th>Context</th><th>Payload</th><th>Evidence</th></tr>

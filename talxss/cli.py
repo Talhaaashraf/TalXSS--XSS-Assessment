@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verify", action="store_true",
                     help="Confirm execution in a headless browser (needs Playwright). "
                          "Proves JS ran and catches DOM-based XSS.")
+    ap.add_argument("--no-waf", action="store_true",
+                    help="Skip WAF/firewall detection (on by default, runs first).")
+    ap.add_argument("--no-recon", action="store_true",
+                    help="Skip stack fingerprint + security-header analysis.")
+    ap.add_argument("--no-header-xss", action="store_true",
+                    help="Skip XSS testing via request headers (UA/Referer/XFF).")
     ap.add_argument("--version", action="version", version=f"TalXSS {__version__}")
     args = ap.parse_args(argv)
 
@@ -83,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
         store_path=None if args.no_store else args.db,
         verbose=args.verbose,
         verify=args.verify,
+        waf_check=not args.no_waf,
+        recon=not args.no_recon,
+        header_xss=not args.no_header_xss,
     )
 
     try:

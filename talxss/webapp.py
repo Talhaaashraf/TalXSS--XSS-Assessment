@@ -123,6 +123,9 @@ def start_scan():
         store_path=None if data.get("no_store") else str(DEFAULT_DB),
         verbose=bool(data.get("verbose", True)),
         verify=bool(data.get("verify", False)),
+        waf_check=bool(data.get("waf_check", True)),
+        recon=bool(data.get("recon", True)),
+        header_xss=bool(data.get("header_xss", True)),
     )
 
     job_id = uuid.uuid4().hex[:12]

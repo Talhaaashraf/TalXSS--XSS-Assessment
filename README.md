@@ -17,6 +17,9 @@ panel** (with a target bar) and a **command-line runner**.
 
 ## Features
 - 🎯 **Target bar** web UI + CLI
+- 🛡️ **WAF/firewall detection first** — fingerprints Cloudflare/Akamai/AWS/Imperva/Sucuri/F5/ModSecurity etc. from headers, cookies, and one benign behavioural probe; reports it and **slows down** if blocking is seen (detect & report, never evade)
+- 🔎 **Recon** — server/tech fingerprint + passive **security-header** analysis (missing/weak CSP, HSTS, X-Frame-Options, cookie flags…)
+- 🧪 **All XSS classes** — reflected, stored, DOM (via `--verify`), and **HTTP-header XSS** (`User-Agent`/`Referer`/`X-Forwarded-For`/`X-Forwarded-Host`)
 - 🕷️ **Crawler** — same-host pages, URL parameters, GET/POST forms
 - 🧠 **Reflection analysis** — probes exactly which characters survive unescaped at each point, *explains* why a point is or isn't exploitable, and **prunes payloads that cannot possibly work** (no more blasting 1000 useless vectors)
 - 🎭 **Context-aware engine** — classifies reflection (HTML / attribute / inline-JS / URL) and fires only payloads that fit, with low-false-positive confirmation (unescaped breakout required)
@@ -74,16 +77,22 @@ python -m talxss.cli x --list-wordlists   # show available lists
 | `--no-store` · `--db PATH` | Don't persist / choose the SQLite store. |
 | `-v`, `--verbose` | Log every probe and payload as it is fired. |
 | `--verify` | Confirm execution in headless Chromium (needs Playwright); proves JS runs and catches DOM XSS. |
+| `--no-waf` | Skip WAF/firewall detection (on by default, runs first). |
+| `--no-recon` | Skip stack fingerprint + security-header analysis. |
+| `--no-header-xss` | Skip XSS testing via request headers (UA/Referer/XFF). |
 
-## How it works
+## How it works (black-box pentest flow)
 1. **Scope guard** — refuses any URL outside your authorized host allow-list.
-2. **Crawl** — same-host links, collecting URL parameters and HTML forms.
-3. **Probe** — injects a unique canary to learn *if and where* input reflects.
-4. **Context detection** — HTML body, quoted attribute, inline `<script>`, or URL.
-5. **Targeted payloads** — only the selected attack types for that context, plus your wordlists.
-6. **Confirm** — a finding requires the breakout markup to appear **unescaped** (properly encoded reflections are not reported).
-7. **Stored pass** — re-crawls pages to catch submitted payloads resurfacing elsewhere.
-8. **Persist** — scan + findings written to `talxss.db`.
+2. **Recon + WAF first** — fingerprint the stack, analyse security headers, and detect/fingerprint the firewall before any attack; if it actively blocks a benign probe, throttle.
+3. **Crawl** — same-host links, collecting URL parameters and HTML forms.
+4. **Probe + reflection analysis** — a canary learns *if, where, and with which characters* input reflects; payloads that can't work are pruned.
+5. **Context detection** — HTML body, quoted attribute, inline `<script>`, or URL.
+6. **Targeted payloads** — only the selected attack types for that context, plus your wordlists.
+7. **Confirm** — a finding requires the breakout markup to appear **unescaped** (properly encoded reflections are not reported).
+8. **Header XSS** — repeat the test through `User-Agent`/`Referer`/`X-Forwarded-*` headers.
+9. **Stored pass** — re-crawls pages to catch submitted payloads resurfacing elsewhere.
+10. **Verify** (`--verify`) — headless Chromium confirms JS execution and catches DOM XSS.
+11. **Persist** — scan + findings written to `talxss.db`.
 
 ## Payload lists
 The curated `.txt` vectors live in [`talxss/payload_lists/`](talxss/payload_lists/)
@@ -106,7 +115,8 @@ discovers. Rate-limited and single-threaded by design — an assessment tool, no
 ## Layout
 ```
 talxss/
-  scanner.py            crawl + inject + context-aware + stored engine
+  scanner.py            recon→crawl→inject→context-aware→stored→verify engine
+  recon.py              WAF/firewall detection + fingerprint + security headers
   analyzer.py           reflection character-survival analysis + payload pruning
   verify.py             headless-browser execution verification (Playwright)
   payloads.py           canary tokens, context/attack-type payloads, wordlist loader
