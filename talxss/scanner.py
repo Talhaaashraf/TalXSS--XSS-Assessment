@@ -112,12 +112,31 @@ def _host(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 
+def normalize_scope_entry(entry: str) -> str:
+    """Reduce a scope entry to a bare hostname.
+
+    Operators often paste a full URL (``https://site.com/path?x=1``) or a
+    host:port into the scope box; we forgivingly extract just the hostname so
+    the scope guard still matches instead of refusing the scan.
+    """
+    a = (entry or "").lower().strip()
+    if not a:
+        return ""
+    if "://" in a:
+        return (urlparse(a).hostname or "").strip()
+    # strip any path, query, fragment, or :port that was pasted in
+    a = a.split("/")[0].split("?")[0].split("#")[0]
+    if a.count(":") == 1:          # host:port (ignore IPv6 with many colons)
+        a = a.split(":")[0]
+    return a
+
+
 def in_scope(url: str, scope: Iterable[str]) -> bool:
     h = _host(url)
     if not h:
         return False
     for allowed in scope:
-        a = allowed.lower().strip()
+        a = normalize_scope_entry(allowed)
         if not a:
             continue
         if h == a or h.endswith("." + a):
