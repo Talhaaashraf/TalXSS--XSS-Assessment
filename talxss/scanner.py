@@ -375,6 +375,15 @@ class Scanner:
 
         found_here = False
         for payload in payloads:
+            # Navigational/text payloads (javascript:/vbscript:/markdown) reflect as
+            # plain TEXT on any echoing endpoint — that is not XSS. Without an HTML-
+            # active character (< > " ') there is no breakout to confirm by
+            # reflection; such vectors need a URL/markdown sink and browser proof,
+            # so don't reflection-confirm them here (prevents false positives).
+            if not (set(payload.value) & {"<", ">", '"', "'"}):
+                self._vlog(f"[skip] [{payload.attack_type}] navigational payload needs a "
+                           f"URL/markdown sink + browser proof :: {self._snip(payload.value, 50)}")
+                continue
             # Skip payloads whose required breakout chars are encoded here.
             if not analyzer.payload_feasible(payload.value, prof):
                 self._vlog(f"[skip] [{payload.attack_type}] needs "
@@ -482,16 +491,18 @@ class Scanner:
             url = _verify.exec_url(ip.url, ip.param, payload.value, ip.base_params)
             self._vlog(f"[verify] browser GET {ip.url} param={ip.param} "
                        f"payload={self._snip(payload.value)}")
-            if v.executed(url, canary):
+            hit = v.executed(url, canary)
+            if hit:
+                origin = hit.split("|", 1)[1] if "|" in hit else "?"
                 self.result.findings.append(Finding(
                     url=url, method="GET", parameter=ip.param, context="browser",
                     payload_name=payload.name, payload=payload.value,
                     severity="high", attack_type=payload.attack_type,
-                    note="CONFIRMED: JavaScript executed in a headless browser.",
-                    evidence="window.__talxss callback fired with the canary during page load.",
+                    note=f"CONFIRMED: JavaScript executed in a headless browser (origin: {origin}).",
+                    evidence=f"window.__talxss callback fired: {self._snip(hit, 60)}",
                 ))
                 self.log(f"[CONFIRMED] HIGH [{payload.attack_type}] JS EXECUTED "
-                         f"{ip.url} param={ip.param} :: {payload.name}")
+                         f"{ip.url} param={ip.param} origin={origin} :: {payload.name}")
                 return  # one proven execution per point is enough
 
     # -- Recon & WAF (the professional's first moves) --------------------- #

@@ -19,7 +19,8 @@ panel** (with a target bar) and a **command-line runner**.
 - 🎯 **Target bar** web UI + CLI
 - 🛡️ **WAF/firewall detection first** — fingerprints Cloudflare/Akamai/AWS/Imperva/Sucuri/F5/ModSecurity etc. from headers, cookies, and one benign behavioural probe; reports it and **slows down** if blocking is seen (detect & report, never evade)
 - 🔎 **Recon** — server/tech fingerprint + passive **security-header** analysis (missing/weak CSP, HSTS, X-Frame-Options, cookie flags…)
-- 🧪 **All XSS classes** — reflected, stored, DOM (via `--verify`), and **HTTP-header XSS** (`User-Agent`/`Referer`/`X-Forwarded-For`/`X-Forwarded-Host`)
+- 🧪 **All XSS classes** — reflected, stored, DOM (via `--verify`), **HTTP-header XSS** (`User-Agent`/`Referer`/`X-Forwarded-For`/`X-Forwarded-Host`), and **mutation XSS (mXSS)** probes
+- 🎚️ **Broad context coverage** (PayloadsAllTheThings-informed) — HTML body, HTML5 event tags (autofocus/onfocus, ontoggle…), double/single-quoted attributes, inline `<script>`, SVG (`onload`/`<script>`/`animate`), `data:`/`vbscript:` URI wrappers, Markdown links, CSS `<style>` breakout, and XHTML-namespace script. Execution verification now reports the **origin** (`document.domain`) the payload fired in
 - 🕷️ **Crawler** — same-host pages, URL parameters, GET/POST forms
 - 🧠 **Reflection analysis** — probes exactly which characters survive unescaped at each point, *explains* why a point is or isn't exploitable, and **prunes payloads that cannot possibly work** (no more blasting 1000 useless vectors)
 - 🎭 **Context-aware engine** — classifies reflection (HTML / attribute / inline-JS / URL) and fires only payloads that fit, with low-false-positive confirmation (unescaped breakout required)

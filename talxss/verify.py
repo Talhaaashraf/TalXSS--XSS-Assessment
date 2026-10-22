@@ -83,8 +83,13 @@ class Verifier:
         )
         return ctx, page, hits
 
-    def executed(self, start_url: str, canary: str) -> bool:
-        """Load `start_url` headless; return True if `canary` ran JavaScript."""
+    def executed(self, start_url: str, canary: str) -> str | None:
+        """Load `start_url` headless; return the matched callback message if
+        `canary` ran JavaScript (e.g. ``<canary>|example.com``), else None.
+
+        A truthy return still works as a boolean 'did it fire?', but the string
+        also carries the origin the payload executed in — stronger report evidence.
+        """
         ctx = page = None
         try:
             ctx, page, hits = self._new_page(start_url)
@@ -97,11 +102,13 @@ class Verifier:
                 marker = page.evaluate("window.__TALXSS_HITS || []")
             except Exception:
                 marker = []
-            fired = any(canary in h for h in hits) or any(canary in str(m) for m in marker)
-            return fired
+            for h in list(hits) + [str(m) for m in marker]:
+                if canary in h:
+                    return h
+            return None
         except Exception as e:  # noqa: BLE001
             self.log(f"  └─ verify error: {type(e).__name__}: {e}")
-            return False
+            return None
         finally:
             try:
                 if ctx:
