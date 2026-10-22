@@ -18,12 +18,18 @@ panel** (with a target bar) and a **command-line runner**.
 ## Features
 - 🎯 **Target bar** web UI + CLI
 - 🕷️ **Crawler** — same-host pages, URL parameters, GET/POST forms
-- 🧠 **Context-aware engine** — classifies reflection (HTML / attribute / inline-JS / URL) and fires only payloads that fit, with low-false-positive confirmation (unescaped breakout required)
+- 🧠 **Reflection analysis** — probes exactly which characters survive unescaped at each point, *explains* why a point is or isn't exploitable, and **prunes payloads that cannot possibly work** (no more blasting 1000 useless vectors)
+- 🎭 **Context-aware engine** — classifies reflection (HTML / attribute / inline-JS / URL) and fires only payloads that fit, with low-false-positive confirmation (unescaped breakout required)
+- 🌐 **Headless-browser verification** (`--verify`) — loads the injected page in real Chromium and **confirms the JavaScript actually executed**; this also catches **DOM-based XSS** that never appears in the server HTML
 - 🧩 **Manual attack-type selection** — `reflected`, `stored`, `cookie`, `dom`, `polyglot`, `waf-bypass`, `wordlist`
 - 📚 **Your wordlists** — drop `.txt` payload files in [`talxss/payload_lists/`](talxss/payload_lists/) and fire them as a live attack source
 - 🗄️ **Stored-XSS detection** — submits persistence payloads, then re-crawls to catch them resurfacing on other pages
+- 📣 **Verbose live log** — watch every probe/payload fire in real time (`-v` / UI toggle)
 - 💾 **Persistent history** — every scan + all findings saved to `talxss.db` (SQLite)
 - 📄 **Reports** — downloadable HTML and JSON
+
+### Why "nothing happened" is sometimes the right answer
+If a target properly **encodes its output**, XSS is *not* possible there — and a tool that still cried "vulnerable!" would be lying. TalXSS tells you *why*: e.g. `encoded: < > " '` means tag and attribute breakout are both blocked, so it skips those payloads instead of wasting requests. Real findings come from points where the breakout characters survive **and** (with `--verify`) the JavaScript is seen to run.
 
 ## Install
 ```bash
@@ -66,6 +72,8 @@ python -m talxss.cli x --list-wordlists   # show available lists
 | `--no-crawl` · `--no-forms` · `--insecure` | Narrow the scan / skip forms / skip TLS verify. |
 | `--out FILE` | Write `.html` or `.json` report. |
 | `--no-store` · `--db PATH` | Don't persist / choose the SQLite store. |
+| `-v`, `--verbose` | Log every probe and payload as it is fired. |
+| `--verify` | Confirm execution in headless Chromium (needs Playwright); proves JS runs and catches DOM XSS. |
 
 ## How it works
 1. **Scope guard** — refuses any URL outside your authorized host allow-list.
@@ -89,14 +97,18 @@ The curated `.txt` vectors live in [`talxss/payload_lists/`](talxss/payload_list
 - `HttpOnly`/`Secure`/`SameSite` cookies to blunt impact.
 
 ## Limits
-Detects server-reflected and stored XSS via response analysis. It does not execute JavaScript,
-so purely client-side DOM XSS (JS sink with no server reflection) needs a headless-browser
-verification pass — a clean next module. Rate-limited and single-threaded by design.
+Server-reflected and stored XSS are detected via response analysis (fast, no browser).
+**DOM-based XSS and execution proof require `--verify`** (headless Chromium) — without it, DOM
+sinks that never touch the server HTML are invisible, as they are to any reflection-only tool.
+DOM XSS driven purely by the URL *fragment* (`#...`) is only covered for parameters the crawler
+discovers. Rate-limited and single-threaded by design — an assessment tool, not a flood.
 
 ## Layout
 ```
 talxss/
   scanner.py            crawl + inject + context-aware + stored engine
+  analyzer.py           reflection character-survival analysis + payload pruning
+  verify.py             headless-browser execution verification (Playwright)
   payloads.py           canary tokens, context/attack-type payloads, wordlist loader
   store.py              SQLite scan + findings history
   report.py             HTML / JSON reports

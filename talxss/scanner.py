@@ -27,7 +27,9 @@ import requests
 from bs4 import BeautifulSoup
 
 from .payloads import (new_canary, probe_payload, library_for_context,
-                       stored_payloads, load_wordlist_payloads, Payload)
+                       stored_payloads, load_wordlist_payloads, exec_payloads, Payload)
+from . import analyzer
+from . import verify as _verify
 
 DEFAULT_UA = "TalXSS/1.0 (+authorized-security-assessment)"
 
@@ -53,6 +55,8 @@ class ScanConfig:
     wordlist_files: list[str] | None = None  # None = all .txt lists when wordlist on
     max_wordlist: int = 250          # cap raw payloads fired per point (politeness)
     store_path: str | None = None    # SQLite path to persist this scan, or None
+    verbose: bool = False            # log every probe/payload as it is fired
+    verify: bool = False             # confirm execution in a headless browser (Playwright)
 
 
 @dataclass
@@ -195,6 +199,7 @@ class Scanner:
         self._seen_points: set[tuple] = set()
         self._visited_pages: list[str] = []          # GET-able URLs, for stored pass
         self._submitted: list[tuple[str, Payload, InjectionPoint]] = []  # canary,payload,point
+        self._get_points: list[InjectionPoint] = []   # GET points, for browser verify
         self.attack_types = config.attack_types      # None = all
 
     # -- HTTP ------------------------------------------------------------- #
@@ -300,14 +305,28 @@ class Scanner:
     def _stored_enabled(self) -> bool:
         return self.attack_types is None or "stored" in self.attack_types
 
-    def test_point(self, ip: InjectionPoint) -> None:
-        canary = new_canary()
-        probe = probe_payload(canary)
+    def _vlog(self, msg: str) -> None:
+        if self.cfg.verbose:
+            self.log(msg)
 
+    @staticmethod
+    def _snip(s: str, n: int = 80) -> str:
+        s = s.replace("\n", " ")
+        return s if len(s) <= n else s[:n] + "…"
+
+    def test_point(self, ip: InjectionPoint) -> None:
+        if ip.method == "GET" and ip not in self._get_points:
+            self._get_points.append(ip)
+        canary = new_canary()
+        probe = analyzer.build_char_probe(canary)  # all significant chars at once
+
+        self._vlog(f"[probe] {ip.method} {ip.url} param={ip.param} canary={canary}")
         body = self._send(ip, probe)
         if body is None:
+            self._vlog("  └─ no response")
             return
         self.result.params_tested += 1
+        self._vlog(f"  └─ reflected={'YES' if canary in body else 'no'}")
 
         # Stored XSS: submit persistence payloads NOW, regardless of whether the
         # immediate response reflects them. They are hunted for later, on other
@@ -315,6 +334,8 @@ class Scanner:
         if self._stored_enabled():
             for sp in stored_payloads(canary, self.attack_types):
                 self._submitted.append((canary, sp, ip))
+                self._vlog(f"[fire] [stored] {ip.method} {ip.url} param={ip.param} "
+                           f"payload={self._snip(sp.value)}")
                 self._send(ip, sp.value)
 
         if canary not in body:
@@ -327,6 +348,13 @@ class Scanner:
         self.log(f"[reflect] {ip.method} {ip.url} param={ip.param} context={context}")
         if context == "none":
             return
+
+        # ---- Reflection analysis: learn which characters survive unescaped ----
+        prof = analyzer.analyze(body, canary, context)
+        self.log(f"[analyze] {prof.summary()}")
+        if not prof.can_inject_tag():
+            self._vlog("  └─ < or > encoded here: tag injection blocked; "
+                       "pruning to payloads that fit the surviving character set")
 
         # Context-aware payloads (reflected/cookie/dom/polyglot/waf); stored is
         # handled above, so drop it from the inline loop to avoid double-submits.
@@ -341,10 +369,21 @@ class Scanner:
 
         found_here = False
         for payload in payloads:
+            # Skip payloads whose required breakout chars are encoded here.
+            if not analyzer.payload_feasible(payload.value, prof):
+                self._vlog(f"[skip] [{payload.attack_type}] needs "
+                           f"{''.join(analyzer.required_chars(payload.value))} "
+                           f"(encoded) :: {self._snip(payload.value, 50)}")
+                continue
+            self._vlog(f"[fire] [{payload.attack_type}] {ip.method} {ip.url} "
+                       f"param={ip.param} payload={self._snip(payload.value)}")
             resp_body = self._send(ip, payload.value)
             if resp_body is None:
+                self._vlog("  └─ no response")
                 continue
-            if not found_here and _unescaped_present(resp_body, payload.confirm):
+            hit = _unescaped_present(resp_body, payload.confirm)
+            self._vlog(f"  └─ {'UNESCAPED → vulnerable' if hit else 'encoded/not reflected'}")
+            if not found_here and hit:
                 self._record(ip, context, payload, resp_body)
                 self.log(f"[FOUND] {payload.severity.upper()} [{payload.attack_type}] "
                          f"{ip.method} {ip.url} param={ip.param} :: {payload.name}")
@@ -409,6 +448,46 @@ class Scanner:
             self.result.errors.append(f"GET {url}: {e}")
             return None
 
+    # -- Headless execution verification (real proof + DOM XSS) ----------- #
+    def verify_pass(self) -> None:
+        """Load each GET point in a real browser and confirm JS actually runs.
+
+        This both upgrades reflected findings to CONFIRMED-execution and catches
+        DOM-based XSS, where the sink is in client-side JS and never appears in
+        the server's HTML (so reflection analysis alone cannot see it).
+        """
+        if not self._get_points:
+            return
+        if not _verify.available():
+            self.log("[verify] Playwright not installed — skipping browser "
+                     "verification. Enable with: pip install playwright && "
+                     "python -m playwright install chromium")
+            return
+        self.log(f"[verify] headless-browser verification of {len(self._get_points)} GET point(s)")
+        with _verify.Verifier(cookies=self.cfg.cookies, headers=self.cfg.headers,
+                              verify_tls=self.cfg.verify_tls,
+                              logger=self._vlog) as v:
+            for ip in self._get_points:
+                self._verify_point(ip, v)
+
+    def _verify_point(self, ip: InjectionPoint, v) -> None:
+        canary = new_canary()  # the exact token our JS will report back
+        for payload in exec_payloads(canary, context="any"):
+            url = _verify.exec_url(ip.url, ip.param, payload.value, ip.base_params)
+            self._vlog(f"[verify] browser GET {ip.url} param={ip.param} "
+                       f"payload={self._snip(payload.value)}")
+            if v.executed(url, canary):
+                self.result.findings.append(Finding(
+                    url=url, method="GET", parameter=ip.param, context="browser",
+                    payload_name=payload.name, payload=payload.value,
+                    severity="high", attack_type=payload.attack_type,
+                    note="CONFIRMED: JavaScript executed in a headless browser.",
+                    evidence="window.__talxss callback fired with the canary during page load.",
+                ))
+                self.log(f"[CONFIRMED] HIGH [{payload.attack_type}] JS EXECUTED "
+                         f"{ip.url} param={ip.param} :: {payload.name}")
+                return  # one proven execution per point is enough
+
     # -- Orchestration ---------------------------------------------------- #
     def run(self) -> ScanResult:
         if not self.cfg.authorized:
@@ -426,6 +505,9 @@ class Scanner:
             # Stored XSS: did anything we submitted resurface elsewhere?
             if self.attack_types is None or "stored" in self.attack_types:
                 self.stored_pass()
+            # Real execution proof + DOM XSS, in a headless browser.
+            if self.cfg.verify:
+                self.verify_pass()
         finally:
             self.result.finished = time.time()
         self.log(f"[done] {len(self.result.findings)} finding(s), "

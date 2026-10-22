@@ -44,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cap raw wordlist payloads fired per injection point.")
     ap.add_argument("--no-store", action="store_true", help="Do not persist this scan.")
     ap.add_argument("--db", default=str(DEFAULT_DB), help="SQLite store path.")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="Log every probe and payload as it is fired.")
+    ap.add_argument("--verify", action="store_true",
+                    help="Confirm execution in a headless browser (needs Playwright). "
+                         "Proves JS ran and catches DOM-based XSS.")
     ap.add_argument("--version", action="version", version=f"TalXSS {__version__}")
     args = ap.parse_args(argv)
 
@@ -76,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         attack_types=attack_types, wordlist_files=wordlists,
         max_wordlist=args.max_wordlist,
         store_path=None if args.no_store else args.db,
+        verbose=args.verbose,
+        verify=args.verify,
     )
 
     try:

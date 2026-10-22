@@ -1,3 +1,9 @@
 requests>=2.31
 beautifulsoup4>=4.12
 flask>=3.0
+
+# Optional: headless-browser execution verification (--verify / UI toggle).
+# Confirms JavaScript actually runs and catches DOM-based XSS. Install with:
+#   pip install playwright
+#   python -m playwright install chromium
+# playwright>=1.40

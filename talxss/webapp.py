@@ -121,6 +121,8 @@ def start_scan():
         wordlist_files=wordlists,
         max_wordlist=int(data.get("max_wordlist", 250)),
         store_path=None if data.get("no_store") else str(DEFAULT_DB),
+        verbose=bool(data.get("verbose", True)),
+        verify=bool(data.get("verify", False)),
     )
 
     job_id = uuid.uuid4().hex[:12]
