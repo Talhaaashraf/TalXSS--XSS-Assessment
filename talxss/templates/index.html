@@ -115,6 +115,11 @@
     <label><input type="checkbox" id="recon" checked> Recon + security headers</label>
     <label><input type="checkbox" id="headerxss" checked> Header XSS (UA/Referer/XFF)</label>
   </div>
+  <div class="row">
+    <label><input type="checkbox" id="multipayload" checked> Fire multiple payloads per point</label>
+    <label><input type="checkbox" id="wafbypass" checked> On WAF block, retry obfuscated variants</label>
+    <label>Re-verify each finding <input id="confirm" type="number" min="3" max="6" value="3" style="width:52px"> times (3–6)</label>
+  </div>
 
   <div class="box" style="margin-bottom:1rem">
     <h3>Attack types (manual selection — leave all ticked for a full assessment)</h3>
@@ -210,6 +215,9 @@ async function startScan(){
     waf_check: $("#wafcheck").checked,
     recon: $("#recon").checked,
     header_xss: $("#headerxss").checked,
+    multi_payload: $("#multipayload").checked,
+    waf_bypass_retry: $("#wafbypass").checked,
+    confirm_repeat: parseInt($("#confirm").value) || 3,
   };
 
   $("#go").disabled = true;

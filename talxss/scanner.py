@@ -61,6 +61,10 @@ class ScanConfig:
     waf_check: bool = True           # fingerprint the WAF/firewall first, then adapt
     recon: bool = True               # fingerprint stack + analyse security headers
     header_xss: bool = True          # test XSS via HTTP request headers
+    multi_payload: bool = True       # keep firing after a hit; record several per point
+    max_findings_per_point: int = 6  # cap distinct confirmed findings per injection point
+    confirm_repeat: int = 3          # re-verify each hit this many times (clamped 3..6)
+    waf_bypass_retry: bool = True    # on a WAF block, retry obfuscated variants (coverage test)
 
 
 @dataclass
@@ -226,6 +230,8 @@ class Scanner:
         self._submitted: list[tuple[str, Payload, InjectionPoint]] = []  # canary,payload,point
         self._get_points: list[InjectionPoint] = []   # GET points, for browser verify
         self.attack_types = config.attack_types      # None = all
+        # Honour "verify 3 times minimum, max 6".
+        self.cfg.confirm_repeat = max(3, min(6, int(config.confirm_repeat)))
 
     # -- HTTP ------------------------------------------------------------- #
     def _request(self, method: str, url: str, params=None, data=None):
@@ -392,8 +398,12 @@ class Scanner:
             payloads += load_wordlist_payloads(
                 canary, self.cfg.wordlist_files, self.cfg.max_wordlist)
 
-        found_here = False
+        found_here = 0
+        blocked_any = False
         for payload in payloads:
+            if found_here >= self.cfg.max_findings_per_point:
+                self._vlog(f"  └─ reached cap of {self.cfg.max_findings_per_point} findings for this point")
+                break
             # Navigational/text payloads (javascript:/vbscript:/markdown) reflect as
             # plain TEXT on any echoing endpoint — that is not XSS. Without an HTML-
             # active character (< > " ') there is no breakout to confirm by
@@ -411,21 +421,45 @@ class Scanner:
                 continue
             self._vlog(f"[fire] [{payload.attack_type}] {ip.method} {ip.url} "
                        f"param={ip.param} payload={self._snip(payload.value)}")
-            resp_body = self._send(ip, payload.value)
+            status, resp_body = self._send_full(ip, payload.value)
             if resp_body is None:
                 self._vlog("  └─ no response")
                 continue
+
+            # WAF block? Retry obfuscated variants and report which get through.
+            if self._looks_blocked(status, resp_body):
+                blocked_any = True
+                self._vlog(f"  └─ blocked by WAF/firewall (HTTP {status})")
+                if self.cfg.waf_bypass_retry and self._waf_bypass_attempt(ip, context, prof):
+                    found_here += 1
+                continue
+
             hit = _unescaped_present(resp_body, payload.confirm)
             self._vlog(f"  └─ {'UNESCAPED → vulnerable' if hit else 'encoded/not reflected'}")
-            if not found_here and hit:
-                self._record(ip, context, payload, resp_body)
+            if hit:
+                # Re-verify 3..6 times so a flaky/one-off reflection isn't reported.
+                reps = self._reconfirm(ip, payload)
+                self._vlog(f"  └─ re-verified {reps}/{self.cfg.confirm_repeat}")
+                if reps < self.cfg.confirm_repeat:
+                    self._vlog("  └─ not reproducible every time — not recorded")
+                    continue
+                self._record(ip, context, payload, resp_body,
+                             reps=reps)
                 self.log(f"[FOUND] {payload.severity.upper()} [{payload.attack_type}] "
-                         f"{ip.method} {ip.url} param={ip.param} :: {payload.name}")
-                found_here = True
-                if payload.attack_type != "cookie":
-                    break  # solid reflected hit; keep probing cookie-impact PoCs
+                         f"{ip.method} {ip.url} param={ip.param} :: {payload.name} "
+                         f"(verified {reps}/{self.cfg.confirm_repeat})")
+                found_here += 1
+                if not self.cfg.multi_payload and payload.attack_type != "cookie":
+                    break  # single-finding mode: one solid hit is enough
+
+        if blocked_any and found_here == 0:
+            self._vlog("  └─ WAF blocked probes and no obfuscation variant got through here")
 
     def _send(self, ip: InjectionPoint, value: str) -> str | None:
+        return self._send_full(ip, value)[1]
+
+    def _send_full(self, ip: InjectionPoint, value: str) -> tuple[int | None, str | None]:
+        """Send a payload; return (status_code, body) so callers can spot WAF blocks."""
         params = dict(ip.base_params)
         params[ip.param] = value
         try:
@@ -433,24 +467,79 @@ class Scanner:
                 resp = self._request("POST", ip.url, data=params)
             else:
                 resp = self._request("GET", ip.url, params=params)
-            return resp.text
+            return resp.status_code, resp.text
         except requests.RequestException as e:
             self.result.errors.append(f"{ip.method} {ip.url} [{ip.param}]: {e}")
-            return None
+            return None, None
+
+    # A request looks WAF-blocked if the status is a classic block code or the
+    # body carries a block-page marker (reuses the recon marker list).
+    def _looks_blocked(self, status: int | None, body: str | None) -> bool:
+        if status in (403, 406, 429, 501, 999):
+            return True
+        if body and any(m in body.lower() for m in _recon._BLOCK_MARKERS):
+            return True
+        return False
+
+    def _reconfirm(self, ip: InjectionPoint, payload: Payload) -> int:
+        """Re-fire a confirmed payload confirm_repeat times; return how many
+        times it reproduced (stability check → kills flaky false positives)."""
+        hits = 0
+        for _ in range(self.cfg.confirm_repeat):
+            body = self._send(ip, payload.value)
+            if body is not None and _unescaped_present(body, payload.confirm):
+                hits += 1
+        return hits
 
     def _record(self, ip: InjectionPoint, context: str, payload: Payload, body: str,
-                stored_url: str | None = None):
+                stored_url: str | None = None, reps: int | None = None,
+                extra_note: str = ""):
         pos = body.find(payload.confirm)
         snippet = body[max(0, pos - 60): pos + len(payload.confirm) + 60]
         note = payload.note
         if stored_url:
             note = f"STORED: injected at {ip.url} [{ip.param}], resurfaced on {stored_url}. {note}"
+        if extra_note:
+            note = f"{extra_note} {note}".strip()
+        if reps:
+            note = f"{note} [re-verified {reps}/{self.cfg.confirm_repeat} times]".strip()
         self.result.findings.append(Finding(
             url=stored_url or ip.url, method=ip.method, parameter=ip.param, context=context,
             payload_name=payload.name, payload=payload.value,
             severity=payload.severity, note=note, attack_type=payload.attack_type,
             evidence="…" + snippet.replace("\n", " ") + "…",
         ))
+
+    # -- WAF-bypass retry (authorized WAF-coverage testing) --------------- #
+    def _waf_bypass_attempt(self, ip: InjectionPoint, context: str,
+                            prof) -> bool:
+        """When the WAF blocked a payload, try the obfuscated 'waf-bypass'
+        variants and report which (if any) got through UNblocked and reflected.
+
+        This is coverage testing for an authorized engagement — it documents the
+        gap in the WAF's rules so the defender can close it. Benign markers only.
+        """
+        canary = new_canary()
+        variants = library_for_context(context, canary, ["waf-bypass"])
+        for v in variants:
+            self._vlog(f"[waf-bypass] trying {v.name}: {self._snip(v.value)}")
+            status, body = self._send_full(ip, v.value)
+            if body is None or self._looks_blocked(status, body):
+                self._vlog("  └─ still blocked")
+                continue
+            if _unescaped_present(body, v.confirm):
+                reps = self._reconfirm(ip, v)
+                if reps >= self.cfg.confirm_repeat:
+                    self._record(ip, context, v, body, reps=reps,
+                                 extra_note=f"WAF BYPASSED via obfuscation ({v.name}) — "
+                                            "the firewall blocked the plain payload but "
+                                            "let this variant through. Harden the WAF rule.")
+                    self.log(f"[BYPASS] {v.severity.upper()} [waf-bypass] {ip.method} "
+                             f"{ip.url} param={ip.param} :: {v.name} "
+                             f"(verified {reps}/{self.cfg.confirm_repeat})")
+                    return True
+        self._vlog("  └─ no obfuscation variant bypassed the WAF here")
+        return False
 
     # -- Stored XSS pass -------------------------------------------------- #
     def stored_pass(self) -> None:

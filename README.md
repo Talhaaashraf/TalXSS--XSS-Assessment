@@ -25,6 +25,7 @@ panel** (with a target bar) and a **command-line runner**.
 - 🧠 **Reflection analysis** — probes exactly which characters survive unescaped at each point, *explains* why a point is or isn't exploitable, and **prunes payloads that cannot possibly work** (no more blasting 1000 useless vectors)
 - 🎭 **Context-aware engine** — classifies reflection (HTML / attribute / inline-JS / URL) and fires only payloads that fit, with low-false-positive confirmation (unescaped breakout required)
 - 🌐 **Headless-browser verification** (`--verify`) — loads the injected page in real Chromium and **confirms the JavaScript actually executed**; this also catches **DOM-based XSS** that never appears in the server HTML
+- 🔁 **Thorough confirmation** — fires many payloads per point (records several findings), **re-verifies each 3–6×** so flukes aren't reported, and on a **WAF block retries obfuscated variants** to show which defeat the firewall (authorized WAF-coverage testing — reported, not stealthy evasion)
 - 🧩 **Manual attack-type selection** — `reflected`, `stored`, `cookie`, `dom`, `polyglot`, `waf-bypass`, `wordlist`
 - 📚 **Your wordlists** — drop `.txt` payload files in [`talxss/payload_lists/`](talxss/payload_lists/) and fire them as a live attack source
 - 🗄️ **Stored-XSS detection** — submits persistence payloads, then re-crawls to catch them resurfacing on other pages
@@ -81,6 +82,10 @@ python -m talxss.cli x --list-wordlists   # show available lists
 | `--no-waf` | Skip WAF/firewall detection (on by default, runs first). |
 | `--no-recon` | Skip stack fingerprint + security-header analysis. |
 | `--no-header-xss` | Skip XSS testing via request headers (UA/Referer/XFF). |
+| `--confirm N` | Re-verify each finding N times (clamped 3–6). Default 3. |
+| `--single` | Stop at the first confirmed finding per point (default: multiple). |
+| `--max-per-point N` | Cap distinct confirmed findings per point (default 6). |
+| `--no-waf-bypass` | Don't retry obfuscated variants when the WAF blocks a payload. |
 
 ## How it works (black-box pentest flow)
 1. **Scope guard** — refuses any URL outside your authorized host allow-list.

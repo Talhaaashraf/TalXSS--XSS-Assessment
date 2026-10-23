@@ -126,6 +126,9 @@ def start_scan():
         waf_check=bool(data.get("waf_check", True)),
         recon=bool(data.get("recon", True)),
         header_xss=bool(data.get("header_xss", True)),
+        confirm_repeat=int(data.get("confirm_repeat", 3)),
+        multi_payload=bool(data.get("multi_payload", True)),
+        waf_bypass_retry=bool(data.get("waf_bypass_retry", True)),
     )
 
     job_id = uuid.uuid4().hex[:12]

@@ -55,6 +55,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="Skip stack fingerprint + security-header analysis.")
     ap.add_argument("--no-header-xss", action="store_true",
                     help="Skip XSS testing via request headers (UA/Referer/XFF).")
+    ap.add_argument("--confirm", type=int, default=3,
+                    help="Re-verify each finding N times (clamped 3..6). Default 3.")
+    ap.add_argument("--single", action="store_true",
+                    help="Stop at the first confirmed finding per point (default: multiple).")
+    ap.add_argument("--max-per-point", type=int, default=6,
+                    help="Cap distinct confirmed findings per injection point (default 6).")
+    ap.add_argument("--no-waf-bypass", action="store_true",
+                    help="Don't retry obfuscated variants when the WAF blocks a payload.")
     ap.add_argument("--version", action="version", version=f"TalXSS {__version__}")
     args = ap.parse_args(argv)
 
@@ -92,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         waf_check=not args.no_waf,
         recon=not args.no_recon,
         header_xss=not args.no_header_xss,
+        confirm_repeat=args.confirm,
+        multi_payload=not args.single,
+        max_findings_per_point=args.max_per_point,
+        waf_bypass_retry=not args.no_waf_bypass,
     )
 
     try:
