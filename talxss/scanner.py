@@ -79,6 +79,7 @@ class Finding:
     evidence: str
     note: str = ""
     attack_type: str = "reflected"
+    poc: str = ""          # ready-to-run proof (clickable URL or curl command)
 
 
 @dataclass
@@ -201,6 +202,30 @@ def _unescaped_present(body: str, marker: str) -> bool:
         return True  # nothing to encode; rely on raw presence
     # Raw marker present and differs from its encoded form => unescaped sink.
     return True
+
+
+_CANARY_SLOT = re.compile(r"/\*talxss[0-9a-f]+\*/")
+_EXEC_CALL = re.compile(r"window\.__talxss\([^)]*\)")
+
+
+def make_poc(url: str, method: str, param: str, base_params: dict, payload_value: str) -> str:
+    """Turn a benign test payload into a ready-to-run proof of concept.
+
+    The marker/callback is swapped for ``alert(document.domain)`` — a harmless,
+    visible demonstration (pops the origin, steals nothing) that the operator can
+    paste into a browser (GET) or run with curl (header/POST) to reproduce the bug.
+    """
+    real = _CANARY_SLOT.sub("alert(document.domain)", payload_value)
+    real = _EXEC_CALL.sub("alert(document.domain)", real)
+    if param.startswith("header:"):
+        hname = param.split(":", 1)[1]
+        return f'curl -s "{url}" -H "{hname}: {real}"'
+    base = url.split("?")[0]
+    p = dict(base_params)
+    p[param] = real
+    if method == "POST":
+        return f'curl -s -X POST "{base}" --data "{urlencode(p)}"'
+    return base + "?" + urlencode(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -508,6 +533,7 @@ class Scanner:
             payload_name=payload.name, payload=payload.value,
             severity=payload.severity, note=note, attack_type=payload.attack_type,
             evidence="…" + snippet.replace("\n", " ") + "…",
+            poc=make_poc(ip.url, ip.method, ip.param, ip.base_params, payload.value),
         ))
 
     # -- WAF-bypass retry (authorized WAF-coverage testing) --------------- #
@@ -608,6 +634,7 @@ class Scanner:
                     severity="high", attack_type=payload.attack_type,
                     note=f"CONFIRMED: JavaScript executed in a headless browser (origin: {origin}).",
                     evidence=f"window.__talxss callback fired: {self._snip(hit, 60)}",
+                    poc=make_poc(ip.url, "GET", ip.param, ip.base_params, payload.value),
                 ))
                 self.log(f"[CONFIRMED] HIGH [{payload.attack_type}] JS EXECUTED "
                          f"{ip.url} param={ip.param} origin={origin} :: {payload.name}")
@@ -699,6 +726,7 @@ class Scanner:
                     attack_type="header",
                     note=f"Reflected XSS via the {header} request header.",
                     evidence="…" + rb[max(0, pos - 50):pos + 80].replace("\n", " ") + "…",
+                    poc=make_poc(url, "GET", f"header:{header}", {}, payload.value),
                 ))
                 self.log(f"[FOUND] HIGH [header] {header} @ {url} :: {payload.name}")
                 return

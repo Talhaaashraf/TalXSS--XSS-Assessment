@@ -296,14 +296,24 @@ function renderRecon(waf, recon){
 function renderFindings(findings){
   const box = $("#findings");
   if(!findings.length){ if(!box.innerHTML) box.innerHTML='<div style="color:var(--muted);padding:.5rem">No confirmed findings yet…</div>'; return; }
-  box.innerHTML = findings.map(f => `
+  box.innerHTML = findings.map(f => {
+    const what = f.payload || f.payload_name || "—";
+    const detail = f.evidence || f.note || "";
+    const poc = f.poc || "";
+    const pocHtml = poc
+      ? (/^https?:\/\//.test(poc)
+          ? `<div class="mono" style="margin-top:.35rem">▶ PoC: <a href="${esc(poc)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(poc)}</a></div>`
+          : `<div class="mono" style="margin-top:.35rem">▶ PoC: ${esc(poc)}</div>`)
+      : "";
+    return `
     <div class="finding">
       <div><span class="sev ${esc(f.severity)}">${esc(f.severity.toUpperCase())}</span>
-        <b>&nbsp;${esc(f.method)}</b> · param <b>${esc(f.parameter)}</b> · ${esc(f.context)}</div>
+        <b>&nbsp;${esc(f.attack_type||'')}</b> · ${esc(f.method)} · param <b>${esc(f.parameter)}</b></div>
       <div class="mono" style="margin:.35rem 0">${esc(f.url)}</div>
-      <div class="mono">payload: ${esc(f.payload)}</div>
-      <div class="mono" style="color:var(--muted);margin-top:.3rem">${esc(f.evidence)}</div>
-    </div>`).join("");
+      <div class="mono">payload: ${esc(what)}</div>
+      ${detail ? `<div class="mono" style="color:var(--muted);margin-top:.3rem">${esc(detail)}</div>` : ""}
+      ${pocHtml}
+    </div>`; }).join("");
 }
 
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
