@@ -129,6 +129,7 @@ def start_scan():
         confirm_repeat=int(data.get("confirm_repeat", 3)),
         multi_payload=bool(data.get("multi_payload", True)),
         waf_bypass_retry=bool(data.get("waf_bypass_retry", True)),
+        concurrency=int(data.get("concurrency", 1)),
     )
 
     job_id = uuid.uuid4().hex[:12]

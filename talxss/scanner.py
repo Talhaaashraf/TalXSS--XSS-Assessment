@@ -18,6 +18,8 @@ from __future__ import annotations
 import time
 import html
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from urllib.parse import urlparse, urljoin, urlencode, parse_qsl
 from collections import deque
@@ -65,6 +67,7 @@ class ScanConfig:
     max_findings_per_point: int = 6  # cap distinct confirmed findings per injection point
     confirm_repeat: int = 3          # re-verify each hit this many times (clamped 3..6)
     waf_bypass_retry: bool = True    # on a WAF block, retry obfuscated variants (coverage test)
+    concurrency: int = 1             # parallel injection-point workers (politely capped)
 
 
 @dataclass
@@ -259,10 +262,13 @@ class Scanner:
         self.attack_types = config.attack_types      # None = all
         # Honour "verify 3 times minimum, max 6".
         self.cfg.confirm_repeat = max(3, min(6, int(config.confirm_repeat)))
+        # Thread-safety for parallel scanning (guards result counters + lists).
+        self._lock = threading.Lock()
 
     # -- HTTP ------------------------------------------------------------- #
     def _request(self, method: str, url: str, params=None, data=None):
-        self.result.requests_made += 1
+        with self._lock:
+            self.result.requests_made += 1
         if self.cfg.delay:
             time.sleep(self.cfg.delay)
         resp = self.session.request(
@@ -270,7 +276,8 @@ class Scanner:
             timeout=self.cfg.timeout, allow_redirects=True,
             verify=self.cfg.verify_tls,
         )
-        self.result.ok_responses += 1   # reached the target at least once
+        with self._lock:
+            self.result.ok_responses += 1   # reached the target at least once
         return resp
 
     # -- Crawl ------------------------------------------------------------ #
@@ -374,9 +381,19 @@ class Scanner:
         s = s.replace("\n", " ")
         return s if len(s) <= n else s[:n] + "…"
 
+    def _test_point_safe(self, ip: InjectionPoint) -> None:
+        """Worker wrapper: a failure on one point must not kill the whole pool."""
+        try:
+            self.test_point(ip)
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self.result.errors.append(f"test_point {ip.url} [{ip.param}]: {e}")
+
     def test_point(self, ip: InjectionPoint) -> None:
-        if ip.method == "GET" and ip not in self._get_points:
-            self._get_points.append(ip)
+        if ip.method == "GET":
+            with self._lock:
+                if ip not in self._get_points:
+                    self._get_points.append(ip)
         canary = new_canary()
         probe = analyzer.build_char_probe(canary)  # all significant chars at once
 
@@ -385,7 +402,8 @@ class Scanner:
         if body is None:
             self._vlog("  └─ no response")
             return
-        self.result.params_tested += 1
+        with self._lock:
+            self.result.params_tested += 1
         self._vlog(f"  └─ reflected={'YES' if canary in body else 'no'}")
 
         # Stored XSS: submit persistence payloads NOW, regardless of whether the
@@ -393,7 +411,8 @@ class Scanner:
         # pages, by stored_pass(). This is what catches guestbook/comment sinks.
         if self._stored_enabled():
             for sp in stored_payloads(canary, self.attack_types):
-                self._submitted.append((canary, sp, ip))
+                with self._lock:
+                    self._submitted.append((canary, sp, ip))
                 self._vlog(f"[fire] [stored] {ip.method} {ip.url} param={ip.param} "
                            f"payload={self._snip(sp.value)}")
                 self._send(ip, sp.value)
@@ -402,9 +421,10 @@ class Scanner:
             return  # not reflected here -> only the stored path (above) applies
 
         context = detect_context(body, canary)
-        self.result.reflections.append(
-            {"url": ip.url, "method": ip.method, "param": ip.param, "context": context}
-        )
+        with self._lock:
+            self.result.reflections.append(
+                {"url": ip.url, "method": ip.method, "param": ip.param, "context": context}
+            )
         self.log(f"[reflect] {ip.method} {ip.url} param={ip.param} context={context}")
         if context == "none":
             return
@@ -532,13 +552,14 @@ class Scanner:
             note = f"{extra_note} {note}".strip()
         if reps:
             note = f"{note} [re-verified {reps}/{self.cfg.confirm_repeat} times]".strip()
-        self.result.findings.append(Finding(
-            url=stored_url or ip.url, method=ip.method, parameter=ip.param, context=context,
-            payload_name=payload.name, payload=payload.value,
-            severity=payload.severity, note=note, attack_type=payload.attack_type,
-            evidence="…" + snippet.replace("\n", " ") + "…",
-            poc=make_poc(ip.url, ip.method, ip.param, ip.base_params, payload.value),
-        ))
+        with self._lock:
+            self.result.findings.append(Finding(
+                url=stored_url or ip.url, method=ip.method, parameter=ip.param, context=context,
+                payload_name=payload.name, payload=payload.value,
+                severity=payload.severity, note=note, attack_type=payload.attack_type,
+                evidence="…" + snippet.replace("\n", " ") + "…",
+                poc=make_poc(ip.url, ip.method, ip.param, ip.base_params, payload.value),
+            ))
 
     # -- WAF-bypass retry (authorized WAF-coverage testing) --------------- #
     def _waf_bypass_attempt(self, ip: InjectionPoint, context: str,
@@ -758,8 +779,14 @@ class Scanner:
                 self.recon_pass()
             points = self.crawl()
             self.log(f"[crawl] discovered {len(points)} injection point(s)")
-            for ip in points:
-                self.test_point(ip)
+            workers = max(1, int(self.cfg.concurrency))
+            if workers > 1 and len(points) > 1:
+                self.log(f"[scan] testing {len(points)} point(s) with {workers} parallel workers")
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    list(pool.map(self._test_point_safe, points))
+            else:
+                for ip in points:
+                    self.test_point(ip)
             # XSS via request headers (UA/Referer/XFF), if enabled.
             if self.cfg.header_xss and (self.attack_types is None
                                         or "header" in self.attack_types):

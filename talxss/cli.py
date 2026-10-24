@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Cap distinct confirmed findings per injection point (default 6).")
     ap.add_argument("--no-waf-bypass", action="store_true",
                     help="Don't retry obfuscated variants when the WAF blocks a payload.")
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="Parallel injection-point workers (default 1; raise to scan faster).")
     ap.add_argument("--version", action="version", version=f"TalXSS {__version__}")
     args = ap.parse_args(argv)
 
@@ -104,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         multi_payload=not args.single,
         max_findings_per_point=args.max_per_point,
         waf_bypass_retry=not args.no_waf_bypass,
+        concurrency=max(1, args.concurrency),
     )
 
     try:

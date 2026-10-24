@@ -15,9 +15,43 @@ def to_json(result: ScanResult) -> str:
     return json.dumps(result.as_dict(), indent=2)
 
 
-def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
+def pdf_available() -> bool:
+    try:
+        import playwright  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def to_pdf(html_str: str, out_path: str) -> bool:
+    """Render the HTML report to a PDF using headless Chromium (Playwright).
+
+    Returns True on success. If Playwright/Chromium isn't available, returns
+    False so the caller can fall back to 'print the HTML from your browser'.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return False
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content(html_str, wait_until="load")
+            page.pdf(path=out_path, format="A4", print_background=True,
+                     margin={"top": "14mm", "bottom": "14mm", "left": "10mm", "right": "10mm"})
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+def to_html(result: ScanResult, tool_version: str = "1.0.0",
+            branding: dict | None = None) -> str:
     d = result.as_dict()
+    b = branding or {}
     findings = sorted(result.findings, key=lambda f: _SEV_ORDER.get(f.severity, 9))
+    sev_counts = {s: sum(1 for f in findings if f.severity == s) for s in ("high", "medium", "low")}
     rows = []
     for f in findings:
         # Fall back to name/note so recon rows (no payload/evidence) aren't blank.
@@ -78,6 +112,41 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
         banner = (f'<div class="banner hit">● {len(findings)} finding(s) — target reached with '
                   f'{ok} responses. Use the PoC column to reproduce each one.</div>')
 
+    # Branding header (assessor / organisation / engagement) for client delivery.
+    org = html.escape(str(b.get("org", "") or ""))
+    assessor = html.escape(str(b.get("assessor", "") or ""))
+    engagement = html.escape(str(b.get("engagement", "") or ""))
+    logo = b.get("logo", "")  # a data: URI or URL, caller-supplied
+    brand_bits = []
+    if org:
+        brand_bits.append(f"<b>{org}</b>")
+    if engagement:
+        brand_bits.append(f"Engagement: {engagement}")
+    if assessor:
+        brand_bits.append(f"Assessor: {assessor}")
+    logo_html = (f'<img src="{html.escape(logo)}" alt="logo" class="logo">' if logo else "")
+    brand_html = (f'<div class="brand">{logo_html}<div>{" · ".join(brand_bits)}</div></div>'
+                  if (brand_bits or logo_html) else "")
+
+    sev_summary = (f'<div class="sevsum">'
+                   f'<span class="chip high">High: {sev_counts["high"]}</span>'
+                   f'<span class="chip medium">Medium: {sev_counts["medium"]}</span>'
+                   f'<span class="chip low">Low: {sev_counts["low"]}</span></div>')
+
+    remediation_html = (
+        '<h2>Remediation</h2><div class="recon"><ul>'
+        '<li><b>Context-aware output encoding</b> at every sink (HTML body, attribute, '
+        'JS string, URL) — prefer the framework\'s auto-escaping and never build markup '
+        'by string concatenation of untrusted input.</li>'
+        '<li><b>Strict Content-Security-Policy</b> (e.g. <code>default-src \'self\'</code>, '
+        'no <code>unsafe-inline</code>/<code>unsafe-eval</code>) as defence-in-depth.</li>'
+        '<li><b>Validate &amp; normalise input</b> server-side; reject unexpected markup.</li>'
+        '<li><b>Cookie flags</b>: set <code>HttpOnly</code>, <code>Secure</code>, '
+        '<code>SameSite</code> to limit the impact of any XSS.</li>'
+        '<li>For <b>DOM XSS</b>, use safe sinks (<code>textContent</code>, not '
+        '<code>innerHTML</code>) and libraries like DOMPurify for rich content.</li>'
+        '</ul></div>')
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>TalXSS Report — {html.escape(d['config_url'])}</title>
@@ -100,11 +169,19 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
  .banner.bad{{background:#fdecea;border:1px solid #c0392b;color:#8a1f14}}
  .banner.ok{{background:#eafaf1;border:1px solid #2e9e5b;color:#1d6b3c}}
  .banner.hit{{background:#fff4e5;border:1px solid #d35400;color:#8a4300}}
+ .brand{{display:flex;align-items:center;gap:1rem;border-bottom:2px solid #e3e3e3;padding-bottom:.8rem;margin-bottom:1rem;color:#333}}
+ .brand .logo{{max-height:48px;max-width:160px}}
+ .sevsum{{display:flex;gap:.6rem;margin:.4rem 0 1rem}}
+ .chip{{padding:.25rem .7rem;border-radius:999px;color:#fff;font-weight:700;font-size:.8rem}}
+ .chip.high{{background:#c0392b}} .chip.medium{{background:#d35400}} .chip.low{{background:#7f8c8d}}
+ code{{background:#f2f2f2;padding:.05rem .3rem;border-radius:4px;font-size:.85em}}
  footer{{margin-top:2rem;color:#888;font-size:.8rem}}
 </style></head><body>
+{brand_html}
 <h1>TalXSS Assessment Report</h1>
 <div class="sub">Target: <b>{html.escape(d['config_url'])}</b> · Generated {generated} · v{tool_version}</div>
 {banner}
+{sev_summary}
 <div class="cards">
   <div class="card"><b>{len(findings)}</b>Confirmed findings</div>
   <div class="card"><b>{d['pages_crawled']}</b>Pages crawled</div>
@@ -119,6 +196,7 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
  <tr><th>Severity</th><th>Type</th><th>Method</th><th>URL</th><th>Param</th><th>Payload / What</th><th>Evidence / Detail</th><th>PoC — reproduce</th></tr>
  {body_rows}
 </table>
+{remediation_html}
 <footer>Generated by TalXSS — authorized security assessment only. Findings indicate attacker-controlled
 input reaching an HTML/JS sink unescaped. Remediate via context-aware output encoding and a strict
 Content-Security-Policy.</footer>

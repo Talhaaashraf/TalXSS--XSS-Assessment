@@ -54,6 +54,17 @@ Scope defaults to the target's host; `--authorize` is mandatory (authorized targ
 If the target can't be reached, the report says so plainly — it never fakes a clean
 "0 findings". Add `--no-verify` to skip the browser step, `--confirm 6` for max re-verification.
 
+**For client engagements** (faster scan + branded, client-ready PDF):
+```bash
+python -m talxss.auto https://authorized-target.example --authorize \
+    --concurrency 8 --pdf \
+    --org "Your Company" --assessor "Your Name" --engagement "Q4 Web VAPT"
+```
+`--concurrency N` runs N injection points in parallel; `--pdf` renders a PDF (needs
+Playwright); `--org/--assessor/--engagement/--logo` brand the report header. The report
+includes a severity summary and a remediation section. In the web UI, **⚡ Full Auto Scan**
+runs the same pipeline in parallel with one click.
+
 ## Web UI (target bar)
 ```bash
 python -m talxss.webapp      # http://127.0.0.1:5000  (localhost only)

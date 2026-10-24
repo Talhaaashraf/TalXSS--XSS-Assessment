@@ -259,6 +259,7 @@ async function autoScan(){
     waf_check: true, recon: true, header_xss: true,
     multi_payload: true, waf_bypass_retry: true,
     confirm_repeat: parseInt($("#confirm").value) || 3,
+    concurrency: 5,
   };
   setStatus("⚡ Full auto scan — recon → WAF → crawl → attack → verify…");
   return launch(payload);

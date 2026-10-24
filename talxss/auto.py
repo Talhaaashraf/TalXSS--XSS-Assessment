@@ -37,6 +37,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-verify", action="store_true", help="Skip headless-browser verification.")
     ap.add_argument("--out", default=None, help="Report path base (default: auto-named).")
     ap.add_argument("--insecure", action="store_true", help="Do not verify TLS certs.")
+    ap.add_argument("--concurrency", type=int, default=5,
+                    help="Parallel injection-point workers (default 5; 1 = sequential).")
+    ap.add_argument("--pdf", action="store_true", help="Also render a PDF report (needs Playwright).")
+    ap.add_argument("--org", default="", help="Your organisation name (report branding).")
+    ap.add_argument("--assessor", default="", help="Assessor name (report branding).")
+    ap.add_argument("--engagement", default="", help="Engagement/project label (report branding).")
+    ap.add_argument("--logo", default="", help="Logo URL or data: URI (report branding).")
     args = ap.parse_args(argv)
 
     target = args.target
@@ -77,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         waf_check=True, recon=True, header_xss=True,
         multi_payload=True, confirm_repeat=args.confirm,
         verify_tls=not args.insecure,
+        concurrency=max(1, args.concurrency),
     )
 
     try:
@@ -87,10 +95,22 @@ def main(argv: list[str] | None = None) -> int:
 
     base = args.out or f"talxss-report-{host or 'target'}-{time.strftime('%Y%m%d-%H%M%S')}"
     html_path, json_path = base + ".html", base + ".json"
+    branding = {"org": args.org, "assessor": args.assessor,
+                "engagement": args.engagement, "logo": args.logo}
+    html_doc = to_html(result, __version__, branding=branding)
     with open(html_path, "w", encoding="utf-8") as fh:
-        fh.write(to_html(result, __version__))
+        fh.write(html_doc)
     with open(json_path, "w", encoding="utf-8") as fh:
         fh.write(to_json(result))
+    pdf_path = None
+    if args.pdf:
+        from .report import to_pdf
+        pdf_path = base + ".pdf"
+        if to_pdf(html_doc, pdf_path):
+            print(f"Report (PDF):  {pdf_path}")
+        else:
+            pdf_path = None
+            print("PDF: skipped (Playwright/Chromium unavailable — open the HTML and print to PDF).")
 
     print("\n" + "═" * 62)
     if not result.target_reachable:
