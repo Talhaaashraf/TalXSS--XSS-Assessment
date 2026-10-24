@@ -24,6 +24,8 @@
   button.go{padding:0 1.6rem;font-size:1rem;font-weight:700;background:var(--accent);color:#fff;
     border:none;border-radius:10px;cursor:pointer}
   button.go:disabled{opacity:.5;cursor:not-allowed}
+  button.go.auto{background:linear-gradient(90deg,#f85149,#d29922);white-space:nowrap}
+  button.go.secondary{background:#30363d;color:var(--fg)}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;margin-bottom:1rem}
   .field label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em}
   .field input,.field textarea{width:100%;padding:.55rem .7rem;background:var(--panel);border:1px solid var(--line);
@@ -69,8 +71,13 @@
   <!-- TARGET INSERT BAR -->
   <div class="barwrap">
     <input id="target" type="text" placeholder="Target URL  e.g.  https://your-authorized-site.example/search?q=test" autocomplete="off">
-    <button id="go" class="go">Start Scan</button>
+    <button id="auto" class="go auto" title="One click: work out the scope from the address and run the full black-box assessment with browser verification">⚡ Full Auto Scan</button>
+    <button id="go" class="go secondary">Start Scan</button>
     <span id="status" class="status"></span>
+  </div>
+  <div style="color:var(--muted);font-size:.82rem;margin:-.4rem 0 1rem">
+    <b>Full Auto Scan</b>: just paste a target + tick authorization — it figures out the scope,
+    then runs recon → WAF → crawl → all XSS types → <b>headless-browser verification</b> → report.
   </div>
 
   <div class="grid">
@@ -186,7 +193,8 @@ const $ = s => document.querySelector(s);
 let poll = null, jobId = null;
 
 $("#go").addEventListener("click", startScan);
-$("#target").addEventListener("keydown", e => { if (e.key === "Enter") startScan(); });
+$("#auto").addEventListener("click", autoScan);
+$("#target").addEventListener("keydown", e => { if (e.key === "Enter") autoScan(); });
 
 async function startScan(){
   const target = $("#target").value.trim();
@@ -219,16 +227,53 @@ async function startScan(){
     waf_bypass_retry: $("#wafbypass").checked,
     confirm_repeat: parseInt($("#confirm").value) || 3,
   };
+  return launch(payload);
+}
 
-  $("#go").disabled = true;
+// One-click full black-box scan: works out scope from the address and turns
+// EVERYTHING on (recon, WAF, crawl, all XSS classes + wordlists, header XSS,
+// multi-payload, WAF-bypass retry, and headless-browser verification).
+async function autoScan(){
+  const target = $("#target").value.trim();
+  if(!target){ setStatus("Enter a target URL first."); $("#target").focus(); return; }
+  if(!$("#authorized").checked){
+    setStatus("⚠ Tick the authorization box first — scan only targets you may legally test.");
+    $("#authorized").focus(); return;
+  }
+  // Reflect the full-auto settings in the UI so the operator sees what's running.
+  ["crawl","forms","verifytls","verbose","verify","wafcheck","recon","headerxss",
+   "multipayload","wafbypass"].forEach(id => { const el=$("#"+id); if(el) el.checked=true; });
+  $("#nostore").checked = false;
+  document.querySelectorAll(".atk,.wl").forEach(e => e.checked = true);
+  const payload = {
+    target,
+    scope: $("#scope").value,          // blank → backend defaults to the target host
+    authorized: true,
+    delay: parseFloat($("#delay").value) || 0.2,
+    max_pages: parseInt($("#maxpages").value) || 60,
+    crawl: true, include_forms: true, verify_tls: true,
+    cookies: $("#cookies").value, headers: $("#headers").value,
+    attack_types: [], wordlists: [],   // empty = all
+    max_wordlist: parseInt($("#maxwordlist").value) || 250,
+    no_store: false, verbose: true, verify: true,
+    waf_check: true, recon: true, header_xss: true,
+    multi_payload: true, waf_bypass_retry: true,
+    confirm_repeat: parseInt($("#confirm").value) || 3,
+  };
+  setStatus("⚡ Full auto scan — recon → WAF → crawl → attack → verify…");
+  return launch(payload);
+}
+
+async function launch(payload){
+  $("#go").disabled = true; $("#auto").disabled = true;
   $("#findings").innerHTML = ""; $("#log").textContent = "";
   $("#cards").style.display = "flex"; $("#dl").style.display = "none";
-  setStatus("Starting…");
+  $("#reconbox").style.display = "none";
 
   const r = await fetch("/api/scan", {method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify(payload)});
   const data = await r.json();
-  if(!r.ok){ setStatus("✗ " + (data.error||"error")); $("#go").disabled=false; return; }
+  if(!r.ok){ setStatus("✗ " + (data.error||"error")); $("#go").disabled=false; $("#auto").disabled=false; return; }
 
   jobId = data.job_id;
   setStatus("Scanning scope: " + data.scope.join(", "));
@@ -253,9 +298,11 @@ async function refresh(){
   renderFindings(d.findings||[]);
 
   if(d.status !== "running"){
-    clearInterval(poll); $("#go").disabled = false;
+    clearInterval(poll); $("#go").disabled = false; $("#auto").disabled = false;
     if(d.status==="done"){
-      setStatus("✓ Done — " + (d.findings.length) + " finding(s).");
+      const reach = d.summary && d.summary.target_reachable === false;
+      if(reach){ setStatus("✗ Target UNREACHABLE — nothing was tested (check URL/network)."); }
+      else setStatus("✓ Done — " + (d.findings.length) + " finding(s).");
       $("#dl").style.display="flex";
       $("#dl-html").href="/api/report/"+jobId+".html";
       $("#dl-json").href="/api/report/"+jobId+".json";
