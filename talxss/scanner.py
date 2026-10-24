@@ -93,6 +93,8 @@ class ScanResult:
     errors: list[str] = field(default_factory=list)
     recon: dict = field(default_factory=dict)   # server/tech fingerprint
     waf: dict = field(default_factory=dict)      # WAF profile
+    ok_responses: int = 0        # successful HTTP responses (reachability signal)
+    target_reachable: bool = True
     started: float = 0.0
     finished: float = 0.0
 
@@ -263,11 +265,13 @@ class Scanner:
         self.result.requests_made += 1
         if self.cfg.delay:
             time.sleep(self.cfg.delay)
-        return self.session.request(
+        resp = self.session.request(
             method, url, params=params, data=data,
             timeout=self.cfg.timeout, allow_redirects=True,
             verify=self.cfg.verify_tls,
         )
+        self.result.ok_responses += 1   # reached the target at least once
+        return resp
 
     # -- Crawl ------------------------------------------------------------ #
     def crawl(self) -> list[InjectionPoint]:
@@ -768,8 +772,22 @@ class Scanner:
                 self.verify_pass()
         finally:
             self.result.finished = time.time()
+
+        # Be honest about reachability: a clean "0 findings" is meaningless if we
+        # never actually reached the target. This is the difference between
+        # "attacked, nothing vulnerable" and "could not attack at all".
+        self.result.target_reachable = self.result.ok_responses > 0
+        if not self.result.target_reachable:
+            self.log("[ERROR] Target was UNREACHABLE — every request failed "
+                     "(connection refused/timeout/DNS). Nothing was actually tested. "
+                     "Check the URL, your network/VPN, and that the host is up.")
+        elif not self.result.findings:
+            self.log("[result] No XSS confirmed. The target reached fine but reflected "
+                     "input was encoded/blocked everywhere tested (it is defending itself) "
+                     "or the vulnerable surface wasn't reached. This is a real, correct result.")
         self.log(f"[done] {len(self.result.findings)} finding(s), "
-                 f"{self.result.requests_made} request(s)")
+                 f"{self.result.requests_made} request(s), "
+                 f"{self.result.ok_responses} reached target")
 
         if self.cfg.store_path:
             try:

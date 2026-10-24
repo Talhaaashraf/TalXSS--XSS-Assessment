@@ -62,6 +62,22 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
                   f'<div class="waf">🛡️ Firewall / WAF: {waf_line}</div>'
                   f'<ul>{recon_items}</ul></div>')
 
+    # Honest top-of-report banner: unreachable vs. clean vs. findings.
+    reachable = d.get("target_reachable", True)
+    ok = d.get("ok_responses", 0)
+    if not reachable:
+        banner = ('<div class="banner bad">✗ TARGET UNREACHABLE — every request failed '
+                  '(connection refused / timeout / DNS). Nothing was actually tested; '
+                  'this report is empty because no attack reached the target, not because '
+                  'the target is secure. Check the URL, network/VPN, and that the host is up.</div>')
+    elif not findings:
+        banner = (f'<div class="banner ok">✓ Target reached ({ok} responses) but no XSS was '
+                  'confirmed — reflected input is encoded/blocked on the tested surface. '
+                  'This is a real, correct result (the target is defending itself).</div>')
+    else:
+        banner = (f'<div class="banner hit">● {len(findings)} finding(s) — target reached with '
+                  f'{ok} responses. Use the PoC column to reproduce each one.</div>')
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>TalXSS Report — {html.escape(d['config_url'])}</title>
@@ -80,10 +96,15 @@ def to_html(result: ScanResult, tool_version: str = "1.0.0") -> str:
  .recon{{background:#fff;border:1px solid #e3e3e3;border-radius:10px;padding:1rem 1.25rem;margin:.5rem 0 1.5rem}}
  .recon .waf{{font-size:1.05rem;margin-bottom:.5rem}} .recon ul{{margin:.3rem 0 0;padding-left:1.2rem;color:#444}}
  td.poc a{{color:#1f6feb}} td.poc{{max-width:340px}}
+ .banner{{padding:.9rem 1.1rem;border-radius:10px;margin:1rem 0;font-weight:600}}
+ .banner.bad{{background:#fdecea;border:1px solid #c0392b;color:#8a1f14}}
+ .banner.ok{{background:#eafaf1;border:1px solid #2e9e5b;color:#1d6b3c}}
+ .banner.hit{{background:#fff4e5;border:1px solid #d35400;color:#8a4300}}
  footer{{margin-top:2rem;color:#888;font-size:.8rem}}
 </style></head><body>
 <h1>TalXSS Assessment Report</h1>
 <div class="sub">Target: <b>{html.escape(d['config_url'])}</b> · Generated {generated} · v{tool_version}</div>
+{banner}
 <div class="cards">
   <div class="card"><b>{len(findings)}</b>Confirmed findings</div>
   <div class="card"><b>{d['pages_crawled']}</b>Pages crawled</div>

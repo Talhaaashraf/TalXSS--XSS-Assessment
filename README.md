@@ -39,7 +39,20 @@ If a target properly **encodes its output**, XSS is *not* possible there — and
 ## Install
 ```bash
 pip install -r requirements.txt
+# optional but recommended for REAL (browser-confirmed) results:
+pip install playwright && python -m playwright install chromium
 ```
+
+## Easiest: one-command black-box scan
+Give it only a target — it auto-runs recon → WAF detection → crawl → reflected/stored/
+DOM/header/mXSS → **headless-browser execution verification** → and writes an HTML + JSON
+report with a ready-to-run PoC per finding:
+```bash
+python -m talxss.auto https://authorized-target.example --authorize
+```
+Scope defaults to the target's host; `--authorize` is mandatory (authorized targets only).
+If the target can't be reached, the report says so plainly — it never fakes a clean
+"0 findings". Add `--no-verify` to skip the browser step, `--confirm 6` for max re-verification.
 
 ## Web UI (target bar)
 ```bash
